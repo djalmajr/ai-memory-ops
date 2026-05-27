@@ -1,0 +1,265 @@
+# ai-memory-svc Helm Chart — Rancher UI Questions
+#
+# Reference pattern: ~/<buntime-repo>/charts/questions.base.yaml
+# Documentation: https://rancher.com/docs/rancher/v2.6/en/helm-charts/chart-yaml/#questions-yaml-yml
+#
+# Each `variable` maps directly to a path in `values.yaml`.
+# Groups are displayed as tabs in the Rancher catalog form.
+
+questions:
+
+  # ==================== Wiki Configuration ====================
+  - variable: config.wiki.repoUrl
+    label: "Wiki Content Repository URL"
+    description: "Git URL of the wiki-content repo (ETL target). In prod it points to the internal GitLab."
+    type: string
+    required: true
+    default: "http://gitlab.example.com/my-org/ai-memory-content.git"
+    group: "Wiki Configuration"
+
+  - variable: config.wiki.branch
+    label: "Wiki Branch"
+    description: "Target branch of the wiki-content (direct push, no MR in the pilot)."
+    type: string
+    default: "main"
+    group: "Wiki Configuration"
+
+  - variable: config.language
+    label: "Wiki Language"
+    description: "Content language. Read by the wiki-ingest and wiki-lint skills via .wiki-guardrails.yml."
+    type: enum
+    default: "pt-BR"
+    options:
+      - "pt-BR"
+      - "en"
+      - "es"
+    group: "Wiki Configuration"
+
+  - variable: config.openCode.model
+    label: "OpenCode Model"
+    description: "Model used by the OpenCode CLI during the ingest (e.g. kimi-k2.6, claude-sonnet-4)."
+    type: string
+    default: "kimi-k2.6"
+    group: "Wiki Configuration"
+
+  # ==================== MCP Server ====================
+  - variable: mcp.image.repository
+    label: "MCP Image Repository"
+    description: "MCP server image. The pilot uses nginx as a placeholder until the real MCP chart."
+    type: string
+    default: "nginx"
+    group: "MCP Server"
+
+  - variable: mcp.image.tag
+    label: "MCP Image Tag"
+    type: string
+    default: "1.27-alpine"
+    group: "MCP Server"
+
+  - variable: mcp.port
+    label: "MCP Port"
+    description: "Internal port of the MCP container."
+    type: int
+    default: 8080
+    min: 1024
+    max: 65535
+    group: "MCP Server"
+
+  - variable: mcp.resources.requests.cpu
+    label: "MCP CPU Request"
+    type: string
+    default: "100m"
+    group: "MCP Server"
+
+  - variable: mcp.resources.requests.memory
+    label: "MCP Memory Request"
+    type: string
+    default: "256Mi"
+    group: "MCP Server"
+
+  - variable: mcp.resources.limits.cpu
+    label: "MCP CPU Limit"
+    type: string
+    default: "1"
+    group: "MCP Server"
+
+  - variable: mcp.resources.limits.memory
+    label: "MCP Memory Limit"
+    type: string
+    default: "1Gi"
+    group: "MCP Server"
+
+  # ==================== ETL Pipeline ====================
+  - variable: etl.enabled
+    label: "Enable ETL Sidecar"
+    description: "Enables the etl-cron sidecar with supercronic. Keep it off if there is no real image yet."
+    type: boolean
+    default: false
+    group: "ETL Pipeline"
+
+  - variable: etl.schedule
+    label: "ETL Cron Schedule"
+    description: "5-field cron (supercronic). E.g. '0 0 * * *' for daily at 00:00."
+    type: string
+    default: "0 0 * * *"
+    group: "ETL Pipeline"
+
+  - variable: etl.image.repository
+    label: "ETL Image Repository"
+    description: "ETL image. In the lab it uses the internal registry (registry.example.com); in prod, Nexus."
+    type: string
+    required: true
+    default: "registry.example.com/ai-memory-svc-etl"
+    group: "ETL Pipeline"
+
+  - variable: etl.image.tag
+    label: "ETL Image Tag"
+    type: string
+    required: true
+    default: "0.1.0-rc1"
+    group: "ETL Pipeline"
+
+  - variable: etl.runIndexer
+    label: "Run Indexer on ETL"
+    description: "If true, the ETL script also runs the indexer (SQLite rebuild) at the end."
+    type: boolean
+    default: true
+    group: "ETL Pipeline"
+    show_if: "etl.enabled=true"
+
+  - variable: etl.git.userName
+    label: "ETL Git Author Name"
+    description: "Identity of the bot that commits to the wiki-content."
+    type: string
+    default: "ai-memory-bot"
+    group: "ETL Pipeline"
+    show_if: "etl.enabled=true"
+
+  - variable: etl.git.userEmail
+    label: "ETL Git Author Email"
+    type: string
+    default: "ai-memory-bot@example.com"
+    group: "ETL Pipeline"
+    show_if: "etl.enabled=true"
+
+  # ==================== Persistence ====================
+  - variable: persistence.accessMode
+    label: "PVC Access Mode"
+    description: "RWO supports the topology (SQLite WAL with 1 writer + N readers). RWX is not required."
+    type: enum
+    default: "ReadWriteOnce"
+    options:
+      - "ReadWriteOnce"
+      - "ReadWriteMany"
+    group: "Persistence"
+
+  - variable: persistence.storageClass
+    label: "Storage Class"
+    description: "Storage class of the PVC. Leave empty to use the cluster default, or select a specific one (e.g. gp3, oci-bv, csi-cinder, local-path, longhorn)."
+    type: storageclass
+    default: ""
+    group: "Persistence"
+
+  - variable: persistence.size
+    label: "Volume Size"
+    description: "Space for SQLite, the wiki clone, and the GGUF models cache."
+    type: string
+    default: "20Gi"
+    group: "Persistence"
+
+  # ==================== Networking ====================
+  - variable: service.type
+    label: "Service Type"
+    type: enum
+    default: "ClusterIP"
+    options:
+      - "ClusterIP"
+      - "NodePort"
+      - "LoadBalancer"
+    group: "Networking"
+
+  - variable: service.port
+    label: "Service Port"
+    type: int
+    default: 8080
+    min: 1
+    max: 65535
+    group: "Networking"
+
+  - variable: ingress.enabled
+    label: "Enable Ingress"
+    description: "Enables exposure via Ingress (Traefik in the lab, ingress-nginx in prod)."
+    type: boolean
+    default: false
+    group: "Networking"
+
+  - variable: ingress.className
+    label: "Ingress Class"
+    type: enum
+    default: "traefik"
+    options:
+      - "traefik"
+      - "nginx"
+    group: "Networking"
+    show_if: "ingress.enabled=true"
+
+  - variable: ingress.host
+    label: "Ingress Hostname"
+    description: "Public hostname (without protocol/path). E.g. platform.example.com (lab), example.com (prod)."
+    type: hostname
+    default: "platform.example.com"
+    group: "Networking"
+    show_if: "ingress.enabled=true"
+
+  - variable: ingress.path
+    label: "Ingress Path"
+    description: "Base path. '/' for hostname-only or '/wiki' for path-based."
+    type: string
+    default: "/wiki"
+    group: "Networking"
+    show_if: "ingress.enabled=true"
+
+  - variable: ingress.maxBodySize
+    label: "Max Request Body Size"
+    description: "E.g. 100m, 0 for no limit. Applies only with className=nginx."
+    type: string
+    default: ""
+    group: "Networking"
+    show_if: "ingress.enabled=true"
+
+  - variable: ingress.tls.enabled
+    label: "Enable TLS"
+    description: "Enables HTTPS. Requires cert-manager + ClusterIssuer configured."
+    type: boolean
+    default: true
+    group: "Networking"
+    show_if: "ingress.enabled=true"
+
+  # ==================== Secrets (dev only) ====================
+  - variable: secrets.create
+    label: "Create Secret in chart (dev only)"
+    description: "In prod, keep it false and provision the Secret externally (runbooks/secrets-bootstrap.md)."
+    type: boolean
+    default: false
+    group: "Secrets"
+
+  - variable: secrets.gitlabToken
+    label: "GitLab API Token"
+    description: "Token with read_repository + write_repository scope on the wiki-content."
+    type: password
+    group: "Secrets"
+    show_if: "secrets.create=true"
+
+  - variable: secrets.openCodeKey
+    label: "OpenCode API Key"
+    description: "OpenCode plan key (used by the ETL to call kimi-k2.6)."
+    type: password
+    group: "Secrets"
+    show_if: "secrets.create=true"
+
+  - variable: secrets.mcpAuthToken
+    label: "MCP Auth Token"
+    description: "Bearer token validated by the MCP server."
+    type: password
+    group: "Secrets"
+    show_if: "secrets.create=true"

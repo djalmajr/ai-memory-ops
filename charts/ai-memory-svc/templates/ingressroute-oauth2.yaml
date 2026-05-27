@@ -1,0 +1,35 @@
+{{- if and .Values.oauth2Proxy.enabled .Values.ingress.enabled .Values.ingress.host (eq (.Values.ingress.className | default "nginx") "traefik") }}
+{{- /*
+  Routes the browser routes (/oauth2 callback + /web + /api/v1) to the oauth2-proxy,
+  with priority > the base Ingress "/" (which falls into ai-memory behind the mcp-auth).
+  The remaining routes (/mcp via mcp-auth, open /.well-known, the SPA's "/") stay on the Ingress.
+*/}}
+{{- $name := printf "%s-oauth2" (include "ai-memory-svc.fullname" .) }}
+{{- $svc := $name }}
+{{- $prefixes := list }}
+{{- range .Values.oauth2Proxy.routePrefixes }}
+{{- $prefixes = append $prefixes (printf "PathPrefix(`%s`)" .) }}
+{{- end }}
+{{- $tlsSecret := .Values.ingress.tls.secretName | default (printf "%s-tls" (include "ai-memory-svc.fullname" .)) }}
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: oauth2-proxy
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`{{ .Values.ingress.host }}`) && ({{ join " || " $prefixes }})
+      priority: {{ .Values.oauth2Proxy.routePriority | default 100 }}
+      services:
+        - name: {{ $svc }}
+          port: 4180
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    secretName: {{ $tlsSecret }}
+  {{- end }}
+{{- end }}

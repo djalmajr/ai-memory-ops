@@ -1,0 +1,81 @@
+{{- if .Values.etl.enabled }}
+# ---------------------------------------------------------------------------
+# ETL — k8s CronJob (replaces the old supercronic sidecar). Runs the etl image
+# in `run` mode (one-shot): clone the sources → opencode generates markdown →
+# POST /admin/write-page on ai-memory (via Service DNS) → optional /admin/embed.
+#
+# Trigger: scheduled by `etl.schedule` AND on-demand (no new endpoint):
+#   kubectl create job --from=cronjob/{{ include "ai-memory-svc.fullname" . }}-etl etl-run-$(date +%s)
+# `etl.suspend: true` keeps the scheduling stopped (on-demand only) — useful in
+# the personal environment, where the ETL is only validated.
+# ---------------------------------------------------------------------------
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-etl
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.etl.schedule | quote }}
+  suspend: {{ .Values.etl.suspend | default false }}
+  # Do not overlap ETL runs (clone + opencode are heavy).
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # No automatic retry: a failed run is re-triggered on the next schedule
+      # or manually (avoids reprocessing sources in a loop).
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "ai-memory-svc.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: etl
+              image: "{{ .Values.etl.image.repository }}:{{ .Values.etl.image.tag }}"
+              imagePullPolicy: {{ .Values.etl.image.pullPolicy }}
+              # entrypoint.sh one-shot mode (without supercronic).
+              args: ["run"]
+              env:
+                - name: ETL_RUN_INDEXER
+                  value: {{ .Values.etl.runIndexer | quote }}
+                # Separate pod: reaches ai-memory through the Service DNS (not loopback).
+                - name: AI_MEMORY_SERVER_URL
+                  value: "http://{{ include "ai-memory-svc.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.aiMemory.port }}"
+                - name: AI_MEMORY_WORKSPACE
+                  value: {{ .Values.aiMemory.workspace | quote }}
+              envFrom:
+                - configMapRef:
+                    name: {{ include "ai-memory-svc.configMapName" . }}
+                - secretRef:
+                    name: {{ include "ai-memory-svc.secretName" . }}
+                    optional: true
+              resources:
+                {{- toYaml .Values.etl.resources | nindent 16 }}
+              volumeMounts:
+                # Ephemeral scratch (clone + generated markdown). Does NOT share the
+                # server's RWO PVC — writing to ai-memory is via HTTP.
+                - name: work
+                  mountPath: /data
+                - name: opencode-config
+                  mountPath: /root/.config/opencode/opencode.jsonc
+                  subPath: opencode.jsonc
+                  readOnly: true
+          volumes:
+            - name: work
+              emptyDir: {}
+            - name: opencode-config
+              configMap:
+                name: {{ include "ai-memory-svc.fullname" . }}-opencode
+                items:
+                  - key: opencode.jsonc
+                    path: opencode.jsonc
+{{- end }}

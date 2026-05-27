@@ -1,0 +1,25 @@
+{{- /*
+  Dedicated ConfigMap for the opencode.jsonc — a large JSON does not pollute the env
+  vars of the etl-cron (which uses envFrom on the main configmap). Mounted at
+  ~/.config/opencode/opencode.jsonc via subPath in the deployment.
+
+  Custom providers (e.g. opencode-go) are configured in
+  .Values.config.openCode.providers; the CLI reads this file to learn about
+  endpoints it does not ship by default (which only has Zen + Anthropic/OpenAI OAuth environments).
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-opencode
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+data:
+  opencode.jsonc: |
+{{- if .Values.config.openCode.providers }}
+    {
+      "$schema": "https://opencode.ai/config.json",
+      "provider": {{ .Values.config.openCode.providers | toJson }}
+    }
+{{- else }}
+    { "$schema": "https://opencode.ai/config.json" }
+{{- end }}

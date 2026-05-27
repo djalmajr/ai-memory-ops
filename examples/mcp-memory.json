@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "Example .mcp.json with both MCPs (personal + client). Copy it into your project.",
+    "Both are remote HTTP with OAuth (Keycloak): on the 1st use Claude does a 401 → discovers the AS",
+    "via /.well-known/oauth-protected-resource → PKCE login in the browser → bearer + refresh.",
+    "Mirroring is the agent's task: ask it to read my-org/* from 'memory-my-org' and write to the",
+    "my-org workspace of 'memory-personal' (write via /admin, role mcp:write)."
+  ],
+  "mcpServers": {
+    "memory-personal": {
+      "type": "http",
+      "url": "https://memory.example.com/mcp"
+    },
+    "memory-my-org": {
+      "type": "http",
+      "url": "https://memory.example.com/wiki/mcp"
+    }
+  }
+}

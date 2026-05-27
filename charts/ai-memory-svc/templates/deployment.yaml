@@ -1,0 +1,198 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+spec:
+  # Do NOT scale — single pod, ai-memory has SQLite WAL + single writer actor.
+  # See the storage-class notes in the chart values.
+  replicas: {{ .Values.pod.replicaCount }}
+  strategy:
+    # Recreate avoids a race between 2 replicas mounting the same RWO PVC during upgrade.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "ai-memory-svc.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Forces pod recreation on every helm upgrade (pulls a new image).
+        rollme: {{ randAlphaNum 5 | quote }}
+      labels:
+        {{- include "ai-memory-svc.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # ai-memory runs as uid 1000 (USER in the Dockerfile). fsGroup makes the PVC
+      # writable by group 1000 (the etl-cron runs as root and writes anyway).
+      securityContext:
+        fsGroup: {{ .Values.aiMemory.fsGroup | default 1000 }}
+      containers:
+        # --------------------------------------------------------------
+        # ai-memory — single server. Exposes at the root:
+        #   /mcp (MCP HTTP), /web + /api/v1 (read-only), /admin/* (writes),
+        #   /hook. Source of truth: writer actor + /data/db/memory.sqlite.
+        # Replaces the old `mcp` and `mcp-write` containers.
+        # --------------------------------------------------------------
+        - name: ai-memory
+          image: "{{ .Values.aiMemory.image.repository }}:{{ .Values.aiMemory.image.tag }}"
+          imagePullPolicy: {{ .Values.aiMemory.image.pullPolicy }}
+          args:
+            - serve
+            - --transport
+            - http
+            - --bind
+            - "0.0.0.0:{{ .Values.aiMemory.port }}"
+            - --workspace
+            - {{ .Values.aiMemory.workspace | quote }}
+            {{- if .Values.aiMemory.enableWeb }}
+            - --enable-web
+            {{- end }}
+            {{- with .Values.aiMemory.webUiDir }}
+            - --web-ui-dir
+            - {{ . | quote }}
+            {{- end }}
+            {{- if .Values.aiMemory.httpStateful }}
+            - --http-stateful
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.aiMemory.port }}
+              protocol: TCP
+          env:
+            - name: AI_MEMORY_DATA_DIR
+              value: /data
+            - name: RUST_LOG
+              value: {{ .Values.aiMemory.logLevel | quote }}
+            # Host allowlist — MUST include the ingress host (Traefik preserves the Host).
+            - name: AI_MEMORY_ALLOWED_HOSTS
+              value: {{ join "," .Values.aiMemory.allowedHosts | quote }}
+            {{- with .Values.aiMemory.llm.provider }}
+            - name: AI_MEMORY_LLM_PROVIDER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.aiMemory.llm.baseUrl }}
+            - name: AI_MEMORY_LLM_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.aiMemory.llm.model }}
+            - name: AI_MEMORY_LLM_MODEL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.aiMemory.embedding.provider }}
+            - name: AI_MEMORY_EMBEDDING_PROVIDER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.aiMemory.embedding.baseUrl }}
+            - name: AI_MEMORY_EMBEDDING_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.aiMemory.embedding.model }}
+            - name: AI_MEMORY_EMBEDDING_MODEL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.aiMemory.embedding.dim }}
+            - name: AI_MEMORY_EMBEDDING_DIM
+              value: {{ . | quote }}
+            {{- end }}
+          # Secret brings AI_MEMORY_AUTH_TOKEN (2nd layer, optional), LLM_API_KEY,
+          # OPENAI_API_KEY (embeddings). optional=true → absence does not break the boot.
+          envFrom:
+            - secretRef:
+                name: {{ include "ai-memory-svc.secretName" . }}
+                optional: true
+          resources:
+            {{- toYaml .Values.aiMemory.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          # ai-memory boot is fast; the startup tcpSocket covers embeddings cold-start.
+          startupProbe:
+            tcpSocket:
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            # `ai-memory status` is an HTTP client against 127.0.0.1:49374 (Host allowed).
+            exec:
+              command: ["/usr/local/bin/ai-memory", "status"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+        {{- if .Values.mcpAuth.enabled }}
+        # --------------------------------------------------------------
+        # MCP Auth sidecar — JWT validator (Traefik forwardAuth).
+        # No /data mount. Stateless.
+        # --------------------------------------------------------------
+        - name: mcp-auth
+          image: "{{ .Values.mcpAuth.image.repository }}:{{ .Values.mcpAuth.image.tag }}"
+          imagePullPolicy: {{ .Values.mcpAuth.image.pullPolicy }}
+          ports:
+            - name: auth-http
+              containerPort: {{ .Values.mcpAuth.port }}
+              protocol: TCP
+          env:
+            - name: OIDC_ISSUER
+              value: {{ required "mcpAuth.oidc.issuer is required when mcpAuth.enabled=true" .Values.mcpAuth.oidc.issuer | quote }}
+            - name: OIDC_AUDIENCE
+              value: {{ .Values.mcpAuth.oidc.audience | default "" | quote }}
+            - name: PORT
+              value: {{ .Values.mcpAuth.port | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.mcpAuth.logLevel | default "info" | quote }}
+            - name: JWKS_REFRESH_SECONDS
+              value: {{ .Values.mcpAuth.jwksRefreshSeconds | default 300 | quote }}
+            # OAuth protected resource (RFC 9728). Opt-in.
+            - name: OAUTH_ENABLED
+              value: {{ .Values.mcpAuth.oauth.enabled | default false | quote }}
+            {{- with .Values.mcpAuth.oauth.resource }}
+            - name: OAUTH_RESOURCE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.mcpAuth.oauth.metadataUrl }}
+            - name: OAUTH_RESOURCE_METADATA_URL
+              value: {{ . | quote }}
+            {{- end }}
+            - name: OAUTH_SCOPES
+              value: {{ .Values.mcpAuth.oauth.scopes | default "mcp:read mcp:write" | quote }}
+            # Static token that ai-memory (require_bearer) expects. OPTIONAL: the mcp-auth only
+            # injects Authorization: Bearer <token> into the upstream when this env has a value. If the
+            # Secret does not have AI_MEMORY_AUTH_TOKEN (optional), it stays empty and nothing is injected.
+            - name: UPSTREAM_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ai-memory-svc.secretName" . }}
+                  key: AI_MEMORY_AUTH_TOKEN
+                  optional: true
+          resources:
+            {{- toYaml .Values.mcpAuth.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: auth-http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: auth-http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+        {{- end }}
+        {{- /*
+          The ETL is no longer a sidecar (supercronic): it was extracted into a k8s
+          CronJob (templates/cronjob-etl.yaml), also triggerable on-demand
+          (k8s API / GitLab CI). This way the service pod is identical across all
+          instances (pure ai-memory: personal without ETL; client with CronJob).
+        */}}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "ai-memory-svc.dbPvcName" . }}

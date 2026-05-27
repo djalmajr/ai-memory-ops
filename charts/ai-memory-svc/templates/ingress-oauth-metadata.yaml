@@ -1,0 +1,44 @@
+{{- if and .Values.mcpAuth.enabled .Values.mcpAuth.oauth.enabled .Values.ingress.enabled .Values.ingress.host (eq .Values.ingress.className "traefik") }}
+{{- $path := printf "%s/.well-known/oauth-protected-resource" (.Values.ingress.path | default "" | trimSuffix "/") }}
+# OAuth Protected Resource Metadata (RFC 9728). Dedicated route that serves
+# the PUBLIC metadata straight from the mcp-auth sidecar — WITHOUT forwardAuth (discovery
+# cannot require auth). Reuses the stripprefix (removes /wiki) so the mcp-auth sees
+# `/.well-known/oauth-protected-resource` at the root. Precedes the /wiki route by being
+# more specific.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-oauth-metadata
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+  annotations:
+    {{- $mws := list }}
+    {{- if and .Values.ingress.stripPathPrefix (ne (.Values.ingress.path | default "/") "/") }}
+      {{- $mws = append $mws (printf "%s-%s-stripprefix@kubernetescrd" .Release.Namespace (include "ai-memory-svc.fullname" .)) }}
+    {{- end }}
+    {{- if $mws }}
+    traefik.ingress.kubernetes.io/router.middlewares: {{ join "," $mws | quote }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName | default (printf "%s-tls" (include "ai-memory-svc.fullname" .)) }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ $path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "ai-memory-svc.fullname" . }}
+                port:
+                  number: {{ .Values.service.authPort | default 8081 }}
+{{- end }}

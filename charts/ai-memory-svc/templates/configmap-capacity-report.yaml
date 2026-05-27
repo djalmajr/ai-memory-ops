@@ -1,0 +1,60 @@
+{{- /*
+ConfigMap with the capacity-report.sh script mounted on the monitoring CronJob.
+Pattern: ConfigMap-mounted-script (avoids rebuilding the ETL image).
+Content embedded inline to be self-contained and visible in the PR review.
+*/ -}}
+{{- if .Values.monitoring.capacity.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-capacity-report
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+data:
+  capacity-report.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    WIKI_ROOT="${WIKI_ROOT:-/data/wiki-content/wiki}"
+    if [[ ! -d "$WIKI_ROOT" ]]; then
+      echo "{\"error\":\"WIKI_ROOT not found: $WIKI_ROOT\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >&2
+      exit 1
+    fi
+    PVC_LINE=$(df -B1 "$WIKI_ROOT" | tail -1)
+    PVC_TOTAL=$(echo "$PVC_LINE" | awk '{print $2}')
+    PVC_USED=$(echo "$PVC_LINE" | awk '{print $3}')
+    PVC_AVAIL=$(echo "$PVC_LINE" | awk '{print $4}')
+    PVC_PCT=$(awk "BEGIN {printf \"%.1f\", $PVC_USED * 100 / $PVC_TOTAL}")
+    # awk instead of bc — bc is not in the ETL image (Debian slim)
+    if awk "BEGIN {exit !($PVC_PCT < 50)}"; then SEVERITY="ok"
+    elif awk "BEGIN {exit !($PVC_PCT < 70)}"; then SEVERITY="info"
+    elif awk "BEGIN {exit !($PVC_PCT < 85)}"; then SEVERITY="warning"
+    else SEVERITY="critical"
+    fi
+    PROJECTS_RAW=$(mktemp)
+    trap 'rm -f "$PROJECTS_RAW"' EXIT
+    first=true
+    for d in "$WIKI_ROOT"/*/; do
+      [[ -d "$d" ]] || continue
+      name=$(basename "$d")
+      bytes=$(du -sb "$d" 2>/dev/null | awk '{print $1}')
+      docs=$(find "$d" -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')
+      if $first; then first=false; else printf ',\n' >> "$PROJECTS_RAW"; fi
+      printf '    {"name": "%s", "bytes": %s, "docs": %s}' "$name" "$bytes" "$docs" >> "$PROJECTS_RAW"
+    done
+    cat <<EOF
+    {
+      "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+      "wiki_root": "$WIKI_ROOT",
+      "pvc": {
+        "total_bytes": $PVC_TOTAL,
+        "used_bytes": $PVC_USED,
+        "avail_bytes": $PVC_AVAIL,
+        "pct": $PVC_PCT,
+        "severity": "$SEVERITY"
+      },
+      "projects": [
+    $(cat "$PROJECTS_RAW")
+      ]
+    }
+    EOF
+{{- end }}

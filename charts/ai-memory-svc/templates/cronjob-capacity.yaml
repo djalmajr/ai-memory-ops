@@ -1,0 +1,69 @@
+{{- /*
+Isolated CronJob for capacity monitoring of the ai-memory-svc-data PVC.
+Separate pod (does not contend for a lock with the ETL). Script via ConfigMap (no image
+rebuild). JSON output to stdout — capturable via kubectl logs jobs/...
+Epic #7 (observability) absorbs the push to Prometheus/Loki.
+*/ -}}
+{{- if .Values.monitoring.capacity.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-capacity
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.monitoring.capacity.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "ai-memory-svc.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: capacity-monitor
+        spec:
+          restartPolicy: Never
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: capacity-report
+              image: "{{ .Values.etl.image.repository }}:{{ .Values.etl.image.tag }}"
+              imagePullPolicy: {{ .Values.etl.image.pullPolicy }}
+              command:
+                - /bin/bash
+                - /usr/local/bin/capacity-report.sh
+              env:
+                - name: WIKI_ROOT
+                  value: "/data/wiki"
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                  readOnly: true
+                - name: capacity-script
+                  mountPath: /usr/local/bin/capacity-report.sh
+                  subPath: capacity-report.sh
+                  readOnly: true
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: {{ include "ai-memory-svc.dbPvcName" . }}
+            - name: capacity-script
+              configMap:
+                name: {{ include "ai-memory-svc.fullname" . }}-capacity-report
+                defaultMode: 0755
+                items:
+                  - key: capacity-report.sh
+                    path: capacity-report.sh
+{{- end }}

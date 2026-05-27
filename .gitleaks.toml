@@ -1,0 +1,96 @@
+# gitleaks config — ai-memory-ops
+#
+# Extends the default ruleset (`useDefault = true`) with a few extra detectors
+# for credentials that commonly slip into infra repos (GitLab tokens, inline
+# kubeconfig keys, secrets embedded in URLs).
+#
+# Usage:
+#   gitleaks detect --source . --config .gitleaks.toml -v
+#   gitleaks protect --staged --config .gitleaks.toml -v   # pre-commit
+
+title = "ai-memory-ops secret scanner"
+
+# Keep gitleaks' built-in rules (AWS, GitHub PAT, Slack, etc.)
+[extend]
+useDefault = true
+
+# =============================================================================
+# Extra rules
+# =============================================================================
+
+[[rules]]
+id = "gitlab-pat-glpat"
+description = "GitLab Personal Access Token (glpat- format)."
+regex = '''glpat-[A-Za-z0-9_-]{20,}'''
+tags = ["secret", "gitlab"]
+severity = "critical"
+
+[[rules]]
+id = "gitlab-runner-token"
+description = "GitLab Runner registration token."
+regex = '''GR1348941[A-Za-z0-9_-]{20,}'''
+tags = ["secret", "gitlab"]
+severity = "critical"
+
+[[rules]]
+id = "kubeconfig-client-key-data"
+description = "Inline kubeconfig client-key-data."
+regex = '''client-key-data:\s*[A-Za-z0-9+/=]{100,}'''
+tags = ["secret", "kubeconfig"]
+severity = "critical"
+
+[[rules]]
+id = "oauth2-token-in-url"
+description = "Token inline in a git URL (https://oauth2:TOKEN@...). Use a header or runtime env var instead."
+regex = '''https?://oauth2:[A-Za-z0-9_-]{16,}@'''
+tags = ["secret", "url"]
+severity = "high"
+
+[[rules]]
+id = "basic-auth-url"
+description = "Basic auth (user:pass@host) in a URL. Use a token header or docker login."
+regex = '''https?://[A-Za-z0-9._-]+:[^@\s]{8,}@[A-Za-z0-9.-]+'''
+tags = ["secret", "url"]
+severity = "high"
+# Allowlist: URLs with a shell variable ($VAR / ${VAR}) are docs, not credentials.
+[rules.allowlist]
+regexes = [
+  '''https?://[A-Za-z0-9._-]+:\$[A-Z_][A-Z0-9_]*@''',
+  '''https?://[A-Za-z0-9._-]+:\$\{[^}]+\}@''',
+  '''https?://oauth2:\$[A-Z_][A-Z0-9_]*@''',
+  '''https?://oauth2:\$\{[^}]+\}@''',
+]
+
+# =============================================================================
+# Allowlist — accepted patterns / false positives
+# =============================================================================
+
+[allowlist]
+description = "Placeholders, lockfiles, and generated dependency dirs."
+
+paths = [
+  '''(.*?)\.lock$''',
+  '''package-lock\.json$''',
+  '''bun\.lock$''',
+  '''yarn\.lock$''',
+  '''pnpm-lock\.yaml$''',
+  '''go\.sum$''',
+  '''\.git/''',
+  '''node_modules/''',
+  '''\.gitleaks\.toml$''',
+]
+
+regexes = [
+  '''<[a-z-]+>''',          # <placeholder>-style tokens
+  '''example\.com''',
+  '''my-org''',
+  '''~/\.kube/''',
+  '''~/\.docker/''',
+  '''/etc/ssl/''',
+]
+
+stopwords = [
+  '''example''',
+  '''placeholder''',
+  '''<.*>''',
+]

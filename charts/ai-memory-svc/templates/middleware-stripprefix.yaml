@@ -1,0 +1,14 @@
+{{- if and .Values.ingress.enabled .Values.ingress.stripPathPrefix (eq .Values.ingress.className "traefik") (ne .Values.ingress.path "/") }}
+# Traefik StripPrefix middleware — removes the ingress path prefix (e.g. /wiki)
+# before the request reaches the backend (ai-memory exposes routes at the root: /mcp, /web, /api/v1).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-stripprefix
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+spec:
+  stripPrefix:
+    prefixes:
+      - {{ .Values.ingress.path | quote }}
+{{- end }}

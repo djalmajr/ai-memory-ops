@@ -1,0 +1,16 @@
+apiVersion: v2
+name: ai-memory-svc
+description: ai-memory-svc - ETL + MCP server for an AI-Driven Delivery Workflow. Single pod with mcp container + etl-cron sidecar; writes consolidated Markdown to a Git wiki repo and serves queries via MCP.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+keywords:
+  - wiki
+  - knowledge-base
+  - mcp
+  - etl
+  - sqlite
+  - opencode
+maintainers:
+  - name: ai-memory-svc maintainers

@@ -1,0 +1,73 @@
+{{- if and .Values.ingress.enabled .Values.ingress.host }}
+{{- $path := .Values.ingress.path | default "/" }}
+{{- $isPathBased := ne $path "/" }}
+{{- $className := .Values.ingress.className | default "nginx" }}
+{{- $isNginx := eq $className "nginx" }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+  annotations:
+    {{- if and $isNginx $isPathBased }}
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    {{- end }}
+    {{- if $isNginx }}
+    {{- with .Values.ingress.maxBodySize }}
+    nginx.ingress.kubernetes.io/proxy-body-size: {{ . | quote }}
+    {{- end }}
+    {{- end }}
+    {{- if eq $className "traefik" }}
+    {{- /*
+      Chain of Traefik middlewares (executed in the listed order):
+      1. stripprefix — removes the path prefix (e.g. /wiki) before the backend
+      2. forwardauth — validates JWT via the mcp-auth sidecar
+      Format: <namespace>-<fullname>-<middleware>@kubernetescrd
+    */}}
+    {{- $mws := list }}
+    {{- if and .Values.ingress.stripPathPrefix $isPathBased }}
+      {{- $mws = append $mws (printf "%s-%s-stripprefix@kubernetescrd" .Release.Namespace (include "ai-memory-svc.fullname" .)) }}
+    {{- end }}
+    {{- if .Values.mcpAuth.enabled }}
+      {{- $mws = append $mws (printf "%s-%s-forwardauth@kubernetescrd" .Release.Namespace (include "ai-memory-svc.fullname" .)) }}
+    {{- end }}
+    {{- if $mws }}
+    traefik.ingress.kubernetes.io/router.middlewares: {{ join "," $mws | quote }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName | default (printf "%s-tls" (include "ai-memory-svc.fullname" .)) }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          {{- if and $isNginx $isPathBased }}
+          # nginx-ingress: rewrite-target via regex (full path captured in $2)
+          - path: "{{ $path }}(/|$)(.*)"
+            pathType: ImplementationSpecific
+          {{- else if $isPathBased }}
+          # Traefik (and others): simple prefix — the backend receives the request with the full path.
+          # For strip-prefix in Traefik, use a Middleware via annotation on the Ingress separately.
+          - path: {{ $path }}
+            pathType: Prefix
+          {{- else }}
+          - path: /
+            pathType: Prefix
+          {{- end }}
+            backend:
+              service:
+                name: {{ include "ai-memory-svc.fullname" . }}
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}

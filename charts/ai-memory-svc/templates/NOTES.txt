@@ -1,0 +1,35 @@
+{{- $fullName := include "ai-memory-svc.fullname" . -}}
+
+ai-memory-svc deployed: {{ $fullName }}
+
+Topology:
+- Service pod: {{ $fullName }} (ai-memory{{ if .Values.mcpAuth.enabled }} + mcp-auth{{ end }})
+{{- if .Values.oauth2Proxy.enabled }}
+- oauth2-proxy: {{ $fullName }}-oauth2 (OIDC login for browser — /web, /api/v1)
+{{- end }}
+- ETL: {{ if .Values.etl.enabled }}CronJob {{ $fullName }}-etl ({{ if .Values.etl.suspend }}suspended — on-demand only{{ else }}schedule "{{ .Values.etl.schedule }}"{{ end }}){{ else }}disabled{{ end }}
+- RWO PVC: {{ include "ai-memory-svc.dbPvcName" . }} (ai-memory data dir: wiki/ + db/memory.sqlite)
+- ConfigMap: {{ include "ai-memory-svc.configMapName" . }}
+- Secret (expected): {{ include "ai-memory-svc.secretName" . }}
+  {{- if not .Values.secrets.create }} (not managed by the chart; provision via `kubectl create secret generic` with the keys GITLAB_API_TOKEN, OPENCODE_API_KEY and, if used, AI_MEMORY_AUTH_TOKEN/LLM_API_KEY/OPENAI_API_KEY){{- end }}
+
+How to reach the service:
+
+{{- if .Values.ingress.enabled }}
+  Ingress: https://{{ .Values.ingress.host }}{{ .Values.ingress.path }}
+  - /mcp        → MCP (machine clients{{ if .Values.mcpAuth.enabled }}; auth via mcp-auth/JWT{{ end }})
+  {{- if .Values.oauth2Proxy.enabled }}
+  - /web, /api/v1 → browser UI (OIDC login via oauth2-proxy/Keycloak)
+  {{- end }}
+{{- else }}
+  Local port-forward:
+    kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ $fullName }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  Then: MCP at http://localhost:{{ .Values.service.port }}/mcp · web at /web · read-only API at /api/v1
+{{- end }}
+
+{{- if .Values.etl.enabled }}
+
+To trigger the ETL on-demand (Job from the CronJob):
+
+  kubectl --namespace {{ .Release.Namespace }} create job --from=cronjob/{{ $fullName }}-etl etl-manual-$(date +%s)
+{{- end }}

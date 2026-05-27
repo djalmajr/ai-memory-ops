@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ai-memory-svc.configMapName" . }}
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+data:
+  # ETL config (generates markdown via opencode and writes to ai-memory).
+  WIKI_LANGUAGE: {{ .Values.config.language | quote }}
+  OPENCODE_MODEL: {{ .Values.config.openCode.model | quote }}
+  GIT_AUTHOR_NAME: {{ .Values.etl.git.userName | quote }}
+  GIT_AUTHOR_EMAIL: {{ .Values.etl.git.userEmail | quote }}
+  GIT_COMMITTER_NAME: {{ .Values.etl.git.userName | quote }}
+  GIT_COMMITTER_EMAIL: {{ .Values.etl.git.userEmail | quote }}
+  {{- /* Scheduling = .spec.schedule of the CronJob (templates/cronjob-etl.yaml);
+         ETL_SCHEDULE/supercronic were removed. */}}
+  {{- /* Sources: serialized as JSON for the ETL script to iterate (1 project per source) */}}
+  WIKI_SOURCES_JSON: {{ .Values.config.wiki.sources | toJson | quote }}

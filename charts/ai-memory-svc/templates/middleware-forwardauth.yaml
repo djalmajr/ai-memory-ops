@@ -1,0 +1,25 @@
+{{- if and .Values.mcpAuth.enabled .Values.ingress.enabled (eq .Values.ingress.className "traefik") }}
+# Traefik forwardAuth middleware — delegates validation to the mcp-auth sidecar.
+# Keycloak OIDC acts as the MCP IdP. See images/mcp-auth/README.md.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-forwardauth
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+spec:
+  forwardAuth:
+    # The sidecar's /verify endpoint. ServiceName.namespace.svc:port — internal DNS.
+    address: "http://{{ include "ai-memory-svc.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.authPort | default 8081 }}/verify"
+    # TrustForwardHeader=true lets the sidecar receive X-Forwarded-Method, -Uri, -Host, -For.
+    trustForwardHeader: true
+    # Headers that the mcp-auth may add to the response (echoed to the ai-memory backend).
+    authResponseHeaders:
+      - X-Auth-Email
+      - X-Auth-Username
+      - X-Auth-Sub
+      # When the mcp-auth has UPSTREAM_AUTH_TOKEN, it returns a static Authorization: Bearer <token>;
+      # Traefik replaces the JWT with it before ai-memory (which does an exact match of the
+      # AI_MEMORY_AUTH_TOKEN, without validating the JWT). Empty = mcp-auth does not set it, the original Authorization passes through.
+      - Authorization
+{{- end }}

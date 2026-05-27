@@ -1,0 +1,17 @@
+# Environment-specific Helm overrides — keep the generic values.yaml, but do NOT
+# commit deploy-specific values (they tend to carry real hosts/registries/creds).
+charts/**/values-*.yaml
+
+# Node deps (mcp-write installs from its lockfile)
+node_modules/
+
+# Build / local artifacts
+*.tgz
+dist/
+.bun/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

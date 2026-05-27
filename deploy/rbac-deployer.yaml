@@ -1,0 +1,57 @@
+# RBAC scoped for deploy via CI — APPLIED AT BOOTSTRAP (admin), NOT by the chart.
+#
+# Why outside the chart: if these Role/RoleBinding were in the chart, the `helm upgrade`
+# run by memory-deployer itself would need to manage rbac.* resources — which K8s blocks
+# (escalation prevention: the deployer altering its own RBAC). Keeping them as bootstrap
+# (admin) breaks that circularity and is the correct least-privilege practice.
+#
+# Apply once (admin, k3s KUBECONFIG):
+#   kubectl -n gitlab-runner create serviceaccount memory-deployer   # if it does not exist yet
+#   kubectl apply -f deploy/rbac-deployer.yaml
+#
+# The deploy:memory job in .gitlab-ci.yml uses KUBERNETES_SERVICE_ACCOUNT_OVERWRITE=memory-deployer
+# (runner with service_account_overwrite_allowed) and helm via in-cluster config.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: memory-deployer
+  namespace: memory
+rules:
+  # Resources managed by helm (full CRUD) — apps/core/batch/networking + Traefik CRDs.
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets", "persistentvolumeclaims", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs", "jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["traefik.io"]
+    resources: ["ingressroutes", "middlewares"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Read-only — helm's rollout/--wait observes pods/replicasets; events help with debugging.
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: memory-deployer
+  namespace: memory
+subjects:
+  - kind: ServiceAccount
+    name: memory-deployer
+    namespace: gitlab-runner
+roleRef:
+  kind: Role
+  name: memory-deployer
+  apiGroup: rbac.authorization.k8s.io
