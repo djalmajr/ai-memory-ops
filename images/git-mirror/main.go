@@ -309,6 +309,19 @@ func (m *mirror) pushLoop(ctx context.Context) {
 		// Push under the lock so a concurrent commit doesn't race the
 		// `git push` reading refs/heads/<branch>.
 		err := m.run(ctx, "git", "push", "-u", "origin", m.branch)
+		// Self-heal: the remote may have moved ahead while we held our
+		// clone (typical when someone runs the backfill script against
+		// a fresh repo, or pushes via another tool). Rebase our local
+		// commits on top of origin and try once more before giving up.
+		// Without this, the loop spin-rejects forever (observed once
+		// after delete+recreate of the GitHub repo).
+		if err != nil && strings.Contains(err.Error(), "rejected") {
+			if err2 := m.run(ctx, "git", "pull", "--rebase", "origin", m.branch); err2 == nil {
+				err = m.run(ctx, "git", "push", "-u", "origin", m.branch)
+			} else {
+				slog.Warn("rebase before retry failed", "err", err2)
+			}
+		}
 		m.mu.Unlock()
 		if err != nil {
 			slog.Error("push failed; will retry on next signal", "err", err)
