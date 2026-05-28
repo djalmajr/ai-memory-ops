@@ -21,7 +21,7 @@ spec:
     {{- include "ai-memory-svc.selectorLabels" . | nindent 4 }}
     # `component: main` discriminates the ai-memory + mcp-auth pod from
     # other deployments that share the same selectorLabels (e.g.
-    # contributors-webhook, oauth2-proxy). Without it the Service endpoints
+    # contributors / git-mirror webhooks, oauth2-proxy). Without it the Service endpoints
     # include every pod and /mcp randomly hits 404 on the wrong backend.
     # See gotchas/chart-svc-selector-too-broad-routes-to-wrong-pod.md.
     app.kubernetes.io/component: main

@@ -1,0 +1,110 @@
+{{- if and .Values.webhooks.gitMirror .Values.webhooks.gitMirror.enabled }}
+# Optional: `git-mirror` admission webhook — mirrors each page write into
+# an external git repo (backup/audit log). Plugs into ai-memory via the
+# admission chain (see _helpers.tpl -> `gitMirrorEntry`, which
+# auto-injects the URL into AI_MEMORY_ADMISSION_WEBHOOKS_JSON on the main pod).
+#
+# Auth: SSH deploy key supplied via a Secret (default name:
+# `{release}-git-mirror-ssh`, key `id_ed25519`, fingerprint of the remote
+# host in `known_hosts`). The container sets GIT_SSH_COMMAND to point at
+# the mounted key.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ai-memory-svc.gitMirrorFullname" . }}
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: git-mirror
+spec:
+  # Single writer — git ops are serialized via a process-wide mutex.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "ai-memory-svc.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: git-mirror
+  template:
+    metadata:
+      labels:
+        {{- include "ai-memory-svc.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: git-mirror
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        fsGroup: 65532
+      containers:
+        - name: git-mirror
+          image: "{{ .Values.webhooks.gitMirror.image.repository }}:{{ .Values.webhooks.gitMirror.image.tag }}"
+          imagePullPolicy: {{ .Values.webhooks.gitMirror.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.webhooks.gitMirror.port | default 8080 }}
+              protocol: TCP
+          env:
+            - name: LISTEN_ADDR
+              value: "0.0.0.0:{{ .Values.webhooks.gitMirror.port | default 8080 }}"
+            - name: LOG_LEVEL
+              value: {{ .Values.webhooks.gitMirror.logLevel | default "info" | quote }}
+            - name: REPO_URL
+              value: {{ required "webhooks.gitMirror.repoUrl is required when webhooks.gitMirror.enabled=true" .Values.webhooks.gitMirror.repoUrl | quote }}
+            - name: REPO_BRANCH
+              value: {{ .Values.webhooks.gitMirror.repoBranch | default "main" | quote }}
+            - name: GIT_USER
+              value: {{ .Values.webhooks.gitMirror.git.userName | default "ai-memory git-mirror" | quote }}
+            - name: GIT_EMAIL
+              value: {{ .Values.webhooks.gitMirror.git.userEmail | default "git-mirror@ai-memory.local" | quote }}
+            - name: PUSH_DEBOUNCE
+              value: {{ .Values.webhooks.gitMirror.pushDebounce | default "10s" | quote }}
+            - name: WORK_DIR
+              value: "/work/repo"
+            # SSH-only auth path: the secret mounts id_ed25519 and
+            # known_hosts at /etc/git-ssh. GIT_SSH_COMMAND points git at
+            # those files; -o IdentitiesOnly avoids leaking unrelated
+            # keys from the agent (there isn't one in this container, but
+            # this is the safe default).
+            - name: GIT_SSH_COMMAND
+              value: "ssh -i /etc/git-ssh/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/etc/git-ssh/known_hosts -o StrictHostKeyChecking=yes"
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: ssh-key
+              mountPath: /etc/git-ssh
+              readOnly: true
+          resources:
+            {{- toYaml (.Values.webhooks.gitMirror.resources | default dict) | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false   # git writes to /work + /tmp
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: work
+          emptyDir: {}
+        - name: ssh-key
+          secret:
+            secretName: {{ .Values.webhooks.gitMirror.sshSecret | default (printf "%s-ssh" (include "ai-memory-svc.gitMirrorFullname" .)) }}
+            defaultMode: 0400
+            items:
+              - key: id_ed25519
+                path: id_ed25519
+              - key: known_hosts
+                path: known_hosts
+{{- end }}

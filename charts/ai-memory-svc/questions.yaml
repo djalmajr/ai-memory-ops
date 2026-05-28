@@ -266,22 +266,22 @@ questions:
 
   # ==================== Admission Webhooks ====================
   - variable: webhooks.contributors.enabled
-    label: "Enable contributors-webhook"
+    label: "Enable contributors webhook"
     description: "When on, each page write is enriched with the writing agent (claude-code/codex/...), user, and DCR client UUID in frontmatter.contributors (append-only set keyed by agent+client). Auto-registers in the engine's admission chain via a helper template (no wiring needed)."
     type: boolean
     default: false
     group: "Admission Webhooks"
 
   - variable: webhooks.contributors.image.repository
-    label: "contributors-webhook image"
-    description: "Container image for the contributors-webhook service."
+    label: "contributors image"
+    description: "Container image for the contributors webhook service."
     type: string
-    default: "ghcr.io/djalmajr/ai-memory-ops/contributors-webhook"
+    default: "ghcr.io/djalmajr/ai-memory-ops/contributors"
     group: "Admission Webhooks"
     show_if: "webhooks.contributors.enabled=true"
 
   - variable: webhooks.contributors.image.tag
-    label: "contributors-webhook tag"
+    label: "contributors tag"
     description: "Image tag (use sha-<short> from CI for pinning, or latest)."
     type: string
     default: "latest"
@@ -289,7 +289,7 @@ questions:
     show_if: "webhooks.contributors.enabled=true"
 
   - variable: webhooks.contributors.failurePolicy
-    label: "Failure policy"
+    label: "contributors failure policy"
     description: "What the engine does when the webhook fails. ignore (safer): logs+skips, page still writes. reject: aborts the write - use only for safety-critical webhooks."
     type: enum
     default: "ignore"
@@ -298,3 +298,68 @@ questions:
       - "reject"
     group: "Admission Webhooks"
     show_if: "webhooks.contributors.enabled=true"
+
+  - variable: webhooks.gitMirror.enabled
+    label: "Enable git-mirror webhook"
+    description: "When on, every page write is mirrored as a commit to an external git repo (backup/audit). Requires an SSH deploy key Secret (default name: <release>-git-mirror-ssh with keys id_ed25519 + known_hosts)."
+    type: boolean
+    default: false
+    group: "Admission Webhooks"
+
+  - variable: webhooks.gitMirror.repoUrl
+    label: "git-mirror remote URL"
+    description: "SSH git remote (e.g. git@gitlab.djalmajr.dev:djalmajr/ai-memory-bkp.git). Only SSH auth is wired up."
+    type: string
+    default: ""
+    group: "Admission Webhooks"
+    show_if: "webhooks.gitMirror.enabled=true"
+
+  - variable: webhooks.gitMirror.repoBranch
+    label: "git-mirror branch"
+    description: "Branch to push to (created on first push if it doesn't exist)."
+    type: string
+    default: "main"
+    group: "Admission Webhooks"
+    show_if: "webhooks.gitMirror.enabled=true"
+
+  - variable: webhooks.gitMirror.sshSecret
+    label: "git-mirror SSH secret name"
+    description: "Pre-existing Secret with keys id_ed25519 + known_hosts. Leave empty to use the chart default (<release>-git-mirror-ssh)."
+    type: string
+    default: ""
+    group: "Admission Webhooks"
+    show_if: "webhooks.gitMirror.enabled=true"
+
+  - variable: webhooks.gitMirror.pushDebounce
+    label: "git-mirror push debounce"
+    description: "How long to wait for further commits to coalesce before pushing. Lower = fresher backup; higher = fewer pushes."
+    type: string
+    default: "10s"
+    group: "Admission Webhooks"
+    show_if: "webhooks.gitMirror.enabled=true"
+
+  - variable: webhooks.gitMirror.image.repository
+    label: "git-mirror image"
+    description: "Container image for the git-mirror webhook service."
+    type: string
+    default: "ghcr.io/djalmajr/ai-memory-ops/git-mirror"
+    group: "Admission Webhooks"
+    show_if: "webhooks.gitMirror.enabled=true"
+
+  - variable: webhooks.gitMirror.image.tag
+    label: "git-mirror tag"
+    type: string
+    default: "latest"
+    group: "Admission Webhooks"
+    show_if: "webhooks.gitMirror.enabled=true"
+
+  - variable: webhooks.gitMirror.failurePolicy
+    label: "git-mirror failure policy"
+    description: "Recommended: ignore — backup must never block the engine."
+    type: enum
+    default: "ignore"
+    options:
+      - "ignore"
+      - "reject"
+    group: "Admission Webhooks"
+    show_if: "webhooks.gitMirror.enabled=true"

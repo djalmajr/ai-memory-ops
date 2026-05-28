@@ -97,16 +97,16 @@ aiMemory:
   # Admission webhook chain — synchronous HTTP hooks invoked inside
   # `Wiki::write_page` just before page persistence. Each entry is a
   # {name,url,timeout_ms,failure_policy,events} object. The chart auto-
-  # appends an entry for the local contributors-webhook Service when
-  # `webhooks.contributors.enabled=true` (see `_helpers.tpl ->
-  # contributorsWebhookEntry`), so leave this list empty for that case.
-  # Use this list to register EXTRA webhooks (e.g. external git-mirror).
+  # appends entries for the local `contributors` / `git-mirror` Services
+  # when their `webhooks.*.enabled=true` toggles are on (see `_helpers.tpl`),
+  # so leave this list empty when using the bundled webhooks. Use this
+  # list to register EXTRA webhooks running outside the chart.
   # See engine `crate::admission` for the contract.
   admissionWebhooks: []
   # Example:
   # admissionWebhooks:
-  #   - name: git-mirror
-  #     url: http://git-mirror.memory.svc.cluster.local:8080/notify
+  #   - name: my-custom-webhook
+  #     url: http://my-webhook.namespace.svc.cluster.local:8080/notify
   #     timeout_ms: 10000
   #     failure_policy: ignore
   #     events: [write_page, consolidate]
@@ -118,18 +118,18 @@ aiMemory:
 # extensions open via plug-and-play HTTP services).
 # ----------------------------------------------------------------------------
 webhooks:
-  # contributors-webhook — appends actor identity (agent/user/client) to
+  # `contributors` — appends actor identity (agent/user/client) to
   # frontmatter.contributors as an append-only set keyed by (agent,client).
   # When enabled, the helper auto-registers the URL in the engine's
   # admissionWebhooks list (no manual wiring needed).
   contributors:
     enabled: false
     image:
-      repository: ghcr.io/djalmajr/ai-memory-ops/contributors-webhook
+      repository: ghcr.io/djalmajr/ai-memory-ops/contributors
       tag: latest
       pullPolicy: IfNotPresent
     port: 8080
-    logLevel: info
+    logLevel: info          # debug | info | warn | error
     timeoutMs: 2000
     failurePolicy: ignore   # ignore | reject
     replicaCount: 1
@@ -140,6 +140,43 @@ webhooks:
       limits:
         cpu: 200m
         memory: 64Mi
+
+  # `git-mirror` — mirrors every page write into an external git repo
+  # (durable backup). Requires an SSH deploy key Secret (default name:
+  # `<release>-git-mirror-ssh`) with two keys: `id_ed25519` (private key)
+  # and `known_hosts` (the remote host fingerprint). The helper auto-
+  # registers the webhook URL when enabled.
+  gitMirror:
+    enabled: false
+    image:
+      repository: ghcr.io/djalmajr/ai-memory-ops/git-mirror
+      tag: latest
+      pullPolicy: IfNotPresent
+    port: 8080
+    logLevel: info
+    timeoutMs: 2000
+    failurePolicy: ignore
+    # REQUIRED when enabled. SSH-only ("git@…:…" form). HTTPS auth isn't
+    # wired up (would need a different secret-mount + GIT_ASKPASS path).
+    repoUrl: ""
+    repoBranch: main
+    # How long to wait for further commits before issuing `git push`.
+    # Lower = fresher backup; higher = fewer pushes / less remote chatter.
+    pushDebounce: 10s
+    # Name of the pre-existing Secret with the SSH deploy key. Default
+    # follows the chart fullname pattern; override if you create the
+    # secret with a custom name.
+    sshSecret: ""
+    git:
+      userName: "ai-memory git-mirror"
+      userEmail: "git-mirror@ai-memory.local"
+    resources:
+      requests:
+        cpu: 20m
+        memory: 32Mi
+      limits:
+        cpu: 300m
+        memory: 128Mi
 
 # ----------------------------------------------------------------------------
 # ETL — k8s CronJob (templates/cronjob-etl.yaml). etl image in one-shot `run`

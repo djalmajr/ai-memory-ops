@@ -1,34 +1,34 @@
 {{- if .Values.webhooks.contributors.enabled }}
-# Optional: contributors-webhook — appends actor identity (agent/user/client)
-# to each page's frontmatter.contributors as an append-only set. Plugs into
-# ai-memory via the admission webhook chain (see _helpers.tpl ->
-# `contributorsWebhookEntry`, which auto-injects the URL into
-# AI_MEMORY_ADMISSION_WEBHOOKS_JSON on the main pod).
+# Optional: `contributors` admission webhook — appends actor identity
+# (agent/user/client) to each page's frontmatter.contributors as an
+# append-only set. Plugs into ai-memory via the admission webhook chain
+# (see _helpers.tpl -> `contributorsEntry`, which auto-injects the URL
+# into AI_MEMORY_ADMISSION_WEBHOOKS_JSON on the main pod).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "ai-memory-svc.contributorsWebhookFullname" . }}
+  name: {{ include "ai-memory-svc.contributorsFullname" . }}
   labels:
     {{- include "ai-memory-svc.labels" . | nindent 4 }}
-    app.kubernetes.io/component: contributors-webhook
+    app.kubernetes.io/component: contributors
 spec:
   replicas: {{ .Values.webhooks.contributors.replicaCount | default 1 }}
   selector:
     matchLabels:
       {{- include "ai-memory-svc.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: contributors-webhook
+      app.kubernetes.io/component: contributors
   template:
     metadata:
       labels:
         {{- include "ai-memory-svc.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: contributors-webhook
+        app.kubernetes.io/component: contributors
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-        - name: contributors-webhook
+        - name: contributors
           image: "{{ .Values.webhooks.contributors.image.repository }}:{{ .Values.webhooks.contributors.image.tag }}"
           imagePullPolicy: {{ .Values.webhooks.contributors.image.pullPolicy | default "IfNotPresent" }}
           ports:
@@ -38,7 +38,7 @@ spec:
           env:
             - name: LISTEN_ADDR
               value: "0.0.0.0:{{ .Values.webhooks.contributors.port | default 8080 }}"
-            - name: RUST_LOG
+            - name: LOG_LEVEL
               value: {{ .Values.webhooks.contributors.logLevel | default "info" | quote }}
           resources:
             {{- toYaml (.Values.webhooks.contributors.resources | default dict) | nindent 12 }}
@@ -59,10 +59,7 @@ spec:
             readOnlyRootFilesystem: true
             runAsNonRoot: true
             # 65532 = canonical distroless nonroot UID; matches the
-            # `USER 65532:65532` in images/contributors-webhook/Dockerfile.
-            # Required because Kubernetes `runAsNonRoot` validation can't
-            # verify named users (the previous `USER nonroot` triggered
-            # CreateContainerConfigError).
+            # `USER 65532:65532` in images/contributors/Dockerfile.
             runAsUser: 65532
             capabilities:
               drop: ["ALL"]

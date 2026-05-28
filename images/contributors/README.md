@@ -1,7 +1,8 @@
-# contributors-webhook
+# contributors
 
 Admission webhook for [ai-memory](https://github.com/akitaonrails/ai-memory) — first
-concrete extension built on the admission webhook chain primitive.
+concrete extension built on the admission webhook chain primitive. Go stdlib
+implementation (no external deps).
 
 ## What it does
 
@@ -53,7 +54,7 @@ X-Memory-Op: write_page | consolidate
 | Env | Default | Meaning |
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | bind address |
-| `RUST_LOG`    | `info`         | tracing filter |
+| `LOG_LEVEL`   | `info`         | `debug` \| `info` \| `warn` \| `error` |
 
 ## Wiring
 
@@ -62,7 +63,7 @@ In the engine's `config.toml`:
 ```toml
 [[admission_webhooks]]
 name = "contributors"
-url  = "http://contributors-webhook.<namespace>.svc.cluster.local:8080/enrich"
+url  = "http://contributors.<namespace>.svc.cluster.local:8080/enrich"
 timeout_ms = 2000
 failure_policy = "ignore"
 events = ["write_page", "consolidate"]
@@ -74,7 +75,7 @@ Or via Helm chart `ai-memory-svc` (auto-injects the URL when
 ## Development
 
 ```bash
-cargo run --release
+go run .
 # (in another shell)
 curl -s -XPOST http://127.0.0.1:8080/enrich \
   -H 'Content-Type: application/json' \
@@ -85,7 +86,7 @@ curl -s -XPOST http://127.0.0.1:8080/enrich \
 ## Tests
 
 ```bash
-cargo test
+go test ./...
 ```
 
 Covers: anonymous-actor 204, new-contributor append, repeat-write increment,
