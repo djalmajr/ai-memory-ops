@@ -31,12 +31,17 @@ ARG AI_MEMORY_UI_REF=main
 FROM node:22-slim AS ui
 ARG AI_MEMORY_UI_REPO
 ARG AI_MEMORY_UI_REF
+ARG AI_MEMORY_UI_REPO_API=https://api.github.com/repos/djalmajr/ai-memory-ui
 ARG VITE_APP_NAME="Memory"
 ARG VITE_APP_TAGLINE="knowledge browser"
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /ui
+# Same cache-bust trick as the Rust stage below: ADD a GitHub commits
+# URL whose body shifts each time the UI branch tip moves, forcing
+# buildkit to invalidate the `git clone` layer + everything downstream.
+ADD ${AI_MEMORY_UI_REPO_API}/commits/${AI_MEMORY_UI_REF} /tmp/ui-tip.json
 RUN git clone --depth 1 --branch "${AI_MEMORY_UI_REF}" "${AI_MEMORY_UI_REPO}" .
 RUN npm ci
 ENV VITE_APP_NAME=${VITE_APP_NAME}
