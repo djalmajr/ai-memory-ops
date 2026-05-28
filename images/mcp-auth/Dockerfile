@@ -21,6 +21,13 @@
 # ============================================================================
 FROM golang:1.23-alpine AS builder
 
+# Alpine doesn't ship a bundled `/etc/ssl/certs/ca-certificates.crt` by
+# default — the runtime stage relies on it for HTTPS to public OIDC
+# servers (Keycloak, Auth0, …). Without this, the binary fails with
+# `x509: certificate signed by unknown authority` even against
+# Let's-Encrypt-signed hosts.
+RUN apk add --no-cache ca-certificates
+
 WORKDIR /src
 
 # Copy go.mod + go.sum first for deps caching

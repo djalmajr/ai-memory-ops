@@ -28,7 +28,12 @@ FROM gcr.io/distroless/cc-debian12:nonroot
 WORKDIR /app
 COPY --from=builder /build/target/release/contributors-webhook /usr/local/bin/contributors-webhook
 
-USER nonroot
+# Numeric UID — Kubernetes `runAsNonRoot: true` can only verify a numeric
+# user, named users like `nonroot` (the distroless default) trigger
+# `container has runAsNonRoot and image has non-numeric user (nonroot),
+# cannot verify user is non-root`. 65532 is the canonical distroless
+# nonroot UID and matches the chart template's runAsUser.
+USER 65532:65532
 EXPOSE 8080
 ENV LISTEN_ADDR=0.0.0.0:8080
 ENV RUST_LOG=info

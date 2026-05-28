@@ -58,6 +58,12 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             runAsNonRoot: true
+            # 65532 = canonical distroless nonroot UID; matches the
+            # `USER 65532:65532` in images/contributors-webhook/Dockerfile.
+            # Required because Kubernetes `runAsNonRoot` validation can't
+            # verify named users (the previous `USER nonroot` triggered
+            # CreateContainerConfigError).
+            runAsUser: 65532
             capabilities:
               drop: ["ALL"]
 {{- end }}
