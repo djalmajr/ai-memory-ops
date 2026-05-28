@@ -15,7 +15,13 @@
 #     -t registry.example.com/<grupo>/ai-memory:<ver>
 
 ARG AI_MEMORY_REPO=https://github.com/djalmajr/ai-memory.git
-ARG AI_MEMORY_REF=feature/custom-web-ui
+# Default to the admission-webhooks branch (rebased on feature/custom-web-ui
+# → includes the upstream sync + custom-web-ui frontend + the admission
+# webhook chain + B4 actor context propagation). Override at build time to
+# get a different cut:
+#   --build-arg AI_MEMORY_REF=feature/custom-web-ui   # without admission chain
+#   --build-arg AI_MEMORY_REF=main                     # plain fork main
+ARG AI_MEMORY_REF=feature/admission-webhooks
 ARG AI_MEMORY_UI_REPO=https://github.com/djalmajr/ai-memory-ui.git
 ARG AI_MEMORY_UI_REF=main
 
