@@ -71,7 +71,13 @@ func main() {
 	oauthEnabled = strings.EqualFold(os.Getenv("OAUTH_ENABLED"), "true")
 	oauthResource = strings.TrimRight(os.Getenv("OAUTH_RESOURCE"), "/")
 	oauthMetadataURL = strings.TrimRight(os.Getenv("OAUTH_RESOURCE_METADATA_URL"), "/")
-	oauthScopes = strings.Fields(envOr("OAUTH_SCOPES", "mcp:read mcp:write"))
+	// `profile` and `offline_access` are part of the default set so:
+	// - `profile` makes the JWT carry `preferred_username` → mcp-auth propagates
+	//   it as `X-Memory-Actor-User` → ai-memory's contributors-webhook can
+	//   attribute writes to a human-friendly username (not just the UUID sub).
+	// - `offline_access` lets DCR clients (Codex/Claude Code MCP) keep a
+	//   refresh token so they survive token expiry without re-prompting.
+	oauthScopes = strings.Fields(envOr("OAUTH_SCOPES", "mcp:read mcp:write offline_access profile"))
 
 	logLevel := parseLogLevel(envOr("LOG_LEVEL", "info"))
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))

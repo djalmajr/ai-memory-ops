@@ -186,7 +186,7 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             - name: OAUTH_SCOPES
-              value: {{ .Values.mcpAuth.oauth.scopes | default "mcp:read mcp:write" | quote }}
+              value: {{ .Values.mcpAuth.oauth.scopes | default "mcp:read mcp:write offline_access profile" | quote }}
             # Static token that ai-memory (require_bearer) expects. OPTIONAL: the mcp-auth only
             # injects Authorization: Bearer <token> into the upstream when this env has a value. If the
             # Secret does not have AI_MEMORY_AUTH_TOKEN (optional), it stays empty and nothing is injected.
