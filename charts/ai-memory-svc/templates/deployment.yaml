@@ -56,6 +56,17 @@ spec:
             - "0.0.0.0:{{ .Values.aiMemory.port }}"
             - --workspace
             - {{ .Values.aiMemory.workspace | quote }}
+            {{- with .Values.aiMemory.project }}
+            # `--project` names the bootstrap project the engine creates
+            # on boot (see `ai-memory serve` `get_or_create_project`).
+            # In HTTP transport each request resolves its own project via
+            # the hook router; this flag only controls the SEED row in
+            # the projects table. Omit to inherit the engine's hardcoded
+            # default ("scratch"), which surfaces in the UI as a stray
+            # empty project.
+            - --project
+            - {{ . | quote }}
+            {{- end }}
             {{- if .Values.aiMemory.enableWeb }}
             - --enable-web
             {{- end }}

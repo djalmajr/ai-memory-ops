@@ -66,6 +66,13 @@ aiMemory:
   port: 49374
   # Canonical workspace (multi-workspace in the future). Projects = ETL sources.
   workspace: my-org
+  # Bootstrap project name. The engine ALWAYS creates one project row on
+  # boot (`get_or_create_project`); when this is empty it falls back to
+  # the hardcoded "scratch", which shows up in the UI as a stray empty
+  # project. Set to anything stable (e.g. "default", "system", "_seed")
+  # to avoid that. HTTP requests resolve their own project per-request,
+  # so this only names the seed row.
+  project: ""
   enableWeb: true          # mounts /web (browser) + /api/v1 (read-only)
   webUiDir: ""             # if set, serves a custom static UI at /web (--web-ui-dir)
   httpStateful: false      # stateless by default (curl/simple clients without mcp-remote)
