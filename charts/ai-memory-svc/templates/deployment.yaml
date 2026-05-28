@@ -14,6 +14,13 @@ spec:
   selector:
     matchLabels:
       {{- include "ai-memory-svc.selectorLabels" . | nindent 6 }}
+      # See note in templates/service.yaml — must match the Service selector
+      # so the main pod is reachable via the Service DNS without other
+      # components (contributors-webhook etc.) tagging along on the
+      # endpoint list. NB: spec.selector is IMMUTABLE after creation;
+      # existing releases will require a helm uninstall+install (or kubectl
+      # delete deployment) to pick up this label change.
+      app.kubernetes.io/component: main
   template:
     metadata:
       annotations:
@@ -21,6 +28,7 @@ spec:
         rollme: {{ randAlphaNum 5 | quote }}
       labels:
         {{- include "ai-memory-svc.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: main
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
