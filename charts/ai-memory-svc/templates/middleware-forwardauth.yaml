@@ -18,6 +18,16 @@ spec:
       - X-Auth-Email
       - X-Auth-Username
       - X-Auth-Sub
+      # Per-request actor context — consumed by ai-memory's
+      # `crate::actor::scope_from_headers` Tower middleware to populate the
+      # task-local that `memory_write_page` reads when building admission_ctx.
+      # The admission webhook chain forwards this to each registered webhook
+      # (e.g. contributors-webhook uses agent+client as the append-only set key).
+      - X-Memory-Actor-User
+      - X-Memory-Actor-Sub
+      - X-Memory-Actor-Client
+      - X-Memory-Actor-Agent
+      - X-Memory-Actor-Session-Id
       # When the mcp-auth has UPSTREAM_AUTH_TOKEN, it returns a static Authorization: Bearer <token>;
       # Traefik replaces the JWT with it before ai-memory (which does an exact match of the
       # AI_MEMORY_AUTH_TOKEN, without validating the JWT). Empty = mcp-auth does not set it, the original Authorization passes through.

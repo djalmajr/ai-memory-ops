@@ -315,6 +315,39 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 	if sub != "" {
 		w.Header().Set("X-Auth-Sub", sub)
 	}
+	// X-Memory-Actor-* — consumed by ai-memory's `crate::actor::scope_from_headers`
+	// Tower middleware to populate the per-request `ActorContext` task-local
+	// that `memory_write_page` reads when building `admission_ctx`. The
+	// admission webhook chain then forwards this actor info to each registered
+	// webhook (e.g. `contributors-webhook` uses agent + client as the composite
+	// key of its append-only frontmatter set).
+	//
+	//   preferred_username                            → X-Memory-Actor-User
+	//   sub                                           → X-Memory-Actor-Sub
+	//   azp  (authorized party / DCR client UUID)     → X-Memory-Actor-Client
+	//   client_name  (DCR registered name, optional)  → X-Memory-Actor-Agent
+	//                  (falls back to azp when absent so the header is never blank)
+	//   sid  (session id, optional)                   → X-Memory-Actor-Session-Id
+	if username, _ := claims["preferred_username"].(string); username != "" {
+		w.Header().Set("X-Memory-Actor-User", username)
+	}
+	if sub != "" {
+		w.Header().Set("X-Memory-Actor-Sub", sub)
+	}
+	azp, _ := claims["azp"].(string)
+	if azp != "" {
+		w.Header().Set("X-Memory-Actor-Client", azp)
+	}
+	clientName, _ := claims["client_name"].(string)
+	if clientName == "" {
+		clientName = azp
+	}
+	if clientName != "" {
+		w.Header().Set("X-Memory-Actor-Agent", clientName)
+	}
+	if sid, _ := claims["sid"].(string); sid != "" {
+		w.Header().Set("X-Memory-Actor-Session-Id", sid)
+	}
 	// Injects the static upstream bearer (ai-memory require_bearer) when configured.
 	// Traefik copies this header via authResponseHeaders, swapping the JWT (which ai-memory
 	// does not validate) for the static token it expects. Empty = passes the original Authorization.
