@@ -49,10 +49,18 @@ RUN npm run build   # i18n + tsr generate + tsc + vite build → /ui/dist
 FROM rust:1.95-slim-bookworm AS builder
 ARG AI_MEMORY_REPO
 ARG AI_MEMORY_REF
+ARG AI_MEMORY_REPO_API=https://api.github.com/repos/djalmajr/ai-memory
 RUN apt-get update \
  && apt-get install -y --no-install-recommends pkg-config build-essential curl ca-certificates git \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /work
+# Cache-bust the git clone when the branch tip moves: ADD a URL whose
+# response body changes whenever AI_MEMORY_REF advances. buildkit detects
+# the change and invalidates this + subsequent layers. Without this, a
+# `latest` tag rebuilt against the same branch silently keeps using the
+# cached source (commit 0c6012d would never be rebuilt because the prior
+# 3b902ac layer is cached). The ADD must happen BEFORE `git clone`.
+ADD ${AI_MEMORY_REPO_API}/commits/${AI_MEMORY_REF} /tmp/git-tip.json
 RUN git clone --depth 1 --branch "${AI_MEMORY_REF}" "${AI_MEMORY_REPO}" .
 # TAILWIND_SKIP=1 skips the Tailwind checksum step in build.rs (headless/CI).
 RUN TAILWIND_SKIP=1 cargo build --release -p ai-memory-cli \
