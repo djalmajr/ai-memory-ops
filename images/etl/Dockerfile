@@ -96,17 +96,30 @@ RUN set -eux; \
     rm -f /tmp/opencode.tar.gz
 
 # ============================================================================
-# Skills my-org/skills installed for the opencode agent (global scope).
+# Bake an opencode skill bundle (wiki-ingest, wiki-lint, wiki-init) into the
+# image. Defaults to the public `djalmajr/skills` GitHub bundle — override
+# via build-args when you maintain your own skills repo:
+#
+#   docker build \
+#     --build-arg SKILLS_REPO=acme/skills \
+#     --build-arg SKILLS_LIST=wiki-ingest,wiki-lint,wiki-init \
+#     -t etl:custom images/etl
+#
+# `SKILLS_LIST` is a comma-separated list passed as repeated `-s <name>`
+# flags to `npx -y skills add`. Empty `SKILLS_REPO` skips the install
+# entirely (useful for fast local builds that won't run the ETL).
 # ============================================================================
-RUN npx -y skills add my-org/skills \
-      -a opencode \
-      -s wiki-ingest \
-      -s wiki-lint \
-      -s wiki-init \
-      -y \
-      -g \
- && ls /root/.agents/skills/ \
- && echo "[build] skills installed"
+ARG SKILLS_REPO="djalmajr/skills"
+ARG SKILLS_LIST="wiki-ingest,wiki-lint,wiki-init"
+RUN if [ -n "$SKILLS_REPO" ]; then \
+      flags=$(echo "$SKILLS_LIST" | tr ',' '\n' | sed 's/^/-s /' | xargs); \
+      echo "[build] installing skills: repo=$SKILLS_REPO flags=$flags"; \
+      npx -y skills add "$SKILLS_REPO" -a opencode $flags -y -g && \
+      ls /root/.agents/skills/ && \
+      echo "[build] skills installed"; \
+    else \
+      echo "[build] SKILLS_REPO empty; skipping opencode skills install"; \
+    fi
 
 # ============================================================================
 # Trust extra CA (lab your-ca-issuer). Inert in prod.
