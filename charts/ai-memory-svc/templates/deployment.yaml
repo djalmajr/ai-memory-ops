@@ -98,6 +98,23 @@ spec:
             - name: AI_MEMORY_EMBEDDING_DIM
               value: {{ . | quote }}
             {{- end }}
+            {{- /*
+              Admission webhook chain — runs synchronously inside Wiki::write_page
+              just before page persistence. Each entry is a
+              {name,url,timeout_ms,failure_policy,events} object.
+              Engine reads via `AI_MEMORY_ADMISSION_WEBHOOKS_JSON` and overrides
+              whatever figment loaded (chart-driven config).
+              When `webhooks.contributors.enabled=true`, the _helpers.tpl helper
+              appends a default entry pointing at the in-cluster Service.
+            */}}
+            {{- $webhooks := default (list) .Values.aiMemory.admissionWebhooks }}
+            {{- if .Values.webhooks.contributors.enabled }}
+            {{- $webhooks = append $webhooks (include "ai-memory-svc.contributorsWebhookEntry" . | fromYaml) }}
+            {{- end }}
+            {{- if $webhooks }}
+            - name: AI_MEMORY_ADMISSION_WEBHOOKS_JSON
+              value: {{ $webhooks | toJson | quote }}
+            {{- end }}
           # Secret brings AI_MEMORY_AUTH_TOKEN (2nd layer, optional), LLM_API_KEY,
           # OPENAI_API_KEY (embeddings). optional=true → absence does not break the boot.
           envFrom:

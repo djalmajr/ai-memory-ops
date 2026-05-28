@@ -94,6 +94,52 @@ aiMemory:
     limits:
       cpu: 1500m
       memory: 2Gi
+  # Admission webhook chain — synchronous HTTP hooks invoked inside
+  # `Wiki::write_page` just before page persistence. Each entry is a
+  # {name,url,timeout_ms,failure_policy,events} object. The chart auto-
+  # appends an entry for the local contributors-webhook Service when
+  # `webhooks.contributors.enabled=true` (see `_helpers.tpl ->
+  # contributorsWebhookEntry`), so leave this list empty for that case.
+  # Use this list to register EXTRA webhooks (e.g. external git-mirror).
+  # See engine `crate::admission` for the contract.
+  admissionWebhooks: []
+  # Example:
+  # admissionWebhooks:
+  #   - name: git-mirror
+  #     url: http://git-mirror.memory.svc.cluster.local:8080/notify
+  #     timeout_ms: 10000
+  #     failure_policy: ignore
+  #     events: [write_page, consolidate]
+
+# ----------------------------------------------------------------------------
+# Admission webhooks — bundled extensions that plug into the engine via the
+# admission webhook chain. Each is independently toggleable; the engine has
+# ZERO knowledge of any specific webhook (OCP: engine closed for modification,
+# extensions open via plug-and-play HTTP services).
+# ----------------------------------------------------------------------------
+webhooks:
+  # contributors-webhook — appends actor identity (agent/user/client) to
+  # frontmatter.contributors as an append-only set keyed by (agent,client).
+  # When enabled, the helper auto-registers the URL in the engine's
+  # admissionWebhooks list (no manual wiring needed).
+  contributors:
+    enabled: false
+    image:
+      repository: ghcr.io/djalmajr/ai-memory-ops/contributors-webhook
+      tag: latest
+      pullPolicy: IfNotPresent
+    port: 8080
+    logLevel: info
+    timeoutMs: 2000
+    failurePolicy: ignore   # ignore | reject
+    replicaCount: 1
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 200m
+        memory: 64Mi
 
 # ----------------------------------------------------------------------------
 # ETL — k8s CronJob (templates/cronjob-etl.yaml). etl image in one-shot `run`

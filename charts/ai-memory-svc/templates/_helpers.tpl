@@ -63,3 +63,26 @@ See the storage-class notes in the chart values.
 {{- define "ai-memory-svc.dbPvcName" -}}
 {{- printf "%s-data" (include "ai-memory-svc.fullname" .) }}
 {{- end }}
+
+{{/*
+Service name for the optional contributors-webhook deployment.
+*/}}
+{{- define "ai-memory-svc.contributorsWebhookFullname" -}}
+{{- printf "%s-contributors-webhook" (include "ai-memory-svc.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Default admission webhook entry for the in-cluster contributors-webhook
+Service. Rendered as YAML so deployment.yaml can `fromYaml` it and
+merge into the JSON env var. Operators can still add MORE webhooks via
+`aiMemory.admissionWebhooks` in values.yaml (this default is appended).
+*/}}
+{{- define "ai-memory-svc.contributorsWebhookEntry" -}}
+name: contributors
+url: http://{{ include "ai-memory-svc.contributorsWebhookFullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.webhooks.contributors.port | default 8080 }}/enrich
+timeout_ms: {{ .Values.webhooks.contributors.timeoutMs | default 2000 }}
+failure_policy: {{ .Values.webhooks.contributors.failurePolicy | default "ignore" }}
+events:
+  - write_page
+  - consolidate
+{{- end }}

@@ -263,3 +263,38 @@ questions:
     type: password
     group: "Secrets"
     show_if: "secrets.create=true"
+
+  # ==================== Admission Webhooks ====================
+  - variable: webhooks.contributors.enabled
+    label: "Enable contributors-webhook"
+    description: "When on, each page write is enriched with the writing agent (claude-code/codex/...), user, and DCR client UUID in frontmatter.contributors (append-only set keyed by agent+client). Auto-registers in the engine's admission chain via a helper template (no wiring needed)."
+    type: boolean
+    default: false
+    group: "Admission Webhooks"
+
+  - variable: webhooks.contributors.image.repository
+    label: "contributors-webhook image"
+    description: "Container image for the contributors-webhook service."
+    type: string
+    default: "ghcr.io/djalmajr/ai-memory-ops/contributors-webhook"
+    group: "Admission Webhooks"
+    show_if: "webhooks.contributors.enabled=true"
+
+  - variable: webhooks.contributors.image.tag
+    label: "contributors-webhook tag"
+    description: "Image tag (use sha-<short> from CI for pinning, or latest)."
+    type: string
+    default: "latest"
+    group: "Admission Webhooks"
+    show_if: "webhooks.contributors.enabled=true"
+
+  - variable: webhooks.contributors.failurePolicy
+    label: "Failure policy"
+    description: "What the engine does when the webhook fails. ignore (safer): logs+skips, page still writes. reject: aborts the write - use only for safety-critical webhooks."
+    type: enum
+    default: "ignore"
+    options:
+      - "ignore"
+      - "reject"
+    group: "Admission Webhooks"
+    show_if: "webhooks.contributors.enabled=true"

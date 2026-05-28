@@ -1,0 +1,63 @@
+{{- if .Values.webhooks.contributors.enabled }}
+# Optional: contributors-webhook — appends actor identity (agent/user/client)
+# to each page's frontmatter.contributors as an append-only set. Plugs into
+# ai-memory via the admission webhook chain (see _helpers.tpl ->
+# `contributorsWebhookEntry`, which auto-injects the URL into
+# AI_MEMORY_ADMISSION_WEBHOOKS_JSON on the main pod).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ai-memory-svc.contributorsWebhookFullname" . }}
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: contributors-webhook
+spec:
+  replicas: {{ .Values.webhooks.contributors.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "ai-memory-svc.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: contributors-webhook
+  template:
+    metadata:
+      labels:
+        {{- include "ai-memory-svc.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: contributors-webhook
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: contributors-webhook
+          image: "{{ .Values.webhooks.contributors.image.repository }}:{{ .Values.webhooks.contributors.image.tag }}"
+          imagePullPolicy: {{ .Values.webhooks.contributors.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.webhooks.contributors.port | default 8080 }}
+              protocol: TCP
+          env:
+            - name: LISTEN_ADDR
+              value: "0.0.0.0:{{ .Values.webhooks.contributors.port | default 8080 }}"
+            - name: RUST_LOG
+              value: {{ .Values.webhooks.contributors.logLevel | default "info" | quote }}
+          resources:
+            {{- toYaml (.Values.webhooks.contributors.resources | default dict) | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+{{- end }}
