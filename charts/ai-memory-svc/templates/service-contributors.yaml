@@ -2,10 +2,10 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "ai-memory-svc.contributorsWebhookFullname" . }}
+  name: {{ include "ai-memory-svc.contributorsFullname" . }}
   labels:
     {{- include "ai-memory-svc.labels" . | nindent 4 }}
-    app.kubernetes.io/component: contributors-webhook
+    app.kubernetes.io/component: contributors
 spec:
   type: ClusterIP
   ports:
@@ -15,5 +15,5 @@ spec:
       protocol: TCP
   selector:
     {{- include "ai-memory-svc.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: contributors-webhook
+    app.kubernetes.io/component: contributors
 {{- end }}

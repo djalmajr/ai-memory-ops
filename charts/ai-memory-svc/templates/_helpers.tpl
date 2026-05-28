@@ -65,23 +65,43 @@ See the storage-class notes in the chart values.
 {{- end }}
 
 {{/*
-Service name for the optional contributors-webhook deployment.
+Service name for the optional `contributors` admission webhook deployment.
 */}}
-{{- define "ai-memory-svc.contributorsWebhookFullname" -}}
-{{- printf "%s-contributors-webhook" (include "ai-memory-svc.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- define "ai-memory-svc.contributorsFullname" -}}
+{{- printf "%s-contributors" (include "ai-memory-svc.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
-Default admission webhook entry for the in-cluster contributors-webhook
-Service. Rendered as YAML so deployment.yaml can `fromYaml` it and
-merge into the JSON env var. Operators can still add MORE webhooks via
+Default admission webhook entry for the in-cluster `contributors` Service.
+Rendered as YAML so deployment.yaml can `fromYaml` it and merge into the
+JSON env var. Operators can still add MORE webhooks via
 `aiMemory.admissionWebhooks` in values.yaml (this default is appended).
 */}}
-{{- define "ai-memory-svc.contributorsWebhookEntry" -}}
+{{- define "ai-memory-svc.contributorsEntry" -}}
 name: contributors
-url: http://{{ include "ai-memory-svc.contributorsWebhookFullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.webhooks.contributors.port | default 8080 }}/enrich
+url: http://{{ include "ai-memory-svc.contributorsFullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.webhooks.contributors.port | default 8080 }}/enrich
 timeout_ms: {{ .Values.webhooks.contributors.timeoutMs | default 2000 }}
 failure_policy: {{ .Values.webhooks.contributors.failurePolicy | default "ignore" }}
+events:
+  - write_page
+  - consolidate
+{{- end }}
+
+{{/*
+Service name for the optional `git-mirror` admission webhook deployment.
+*/}}
+{{- define "ai-memory-svc.gitMirrorFullname" -}}
+{{- printf "%s-git-mirror" (include "ai-memory-svc.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Default admission webhook entry for the in-cluster `git-mirror` Service.
+*/}}
+{{- define "ai-memory-svc.gitMirrorEntry" -}}
+name: git-mirror
+url: http://{{ include "ai-memory-svc.gitMirrorFullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.webhooks.gitMirror.port | default 8080 }}/sync
+timeout_ms: {{ .Values.webhooks.gitMirror.timeoutMs | default 2000 }}
+failure_policy: {{ .Values.webhooks.gitMirror.failurePolicy | default "ignore" }}
 events:
   - write_page
   - consolidate

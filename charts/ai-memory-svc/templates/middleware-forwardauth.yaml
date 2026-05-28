@@ -22,7 +22,7 @@ spec:
       # `crate::actor::scope_from_headers` Tower middleware to populate the
       # task-local that `memory_write_page` reads when building admission_ctx.
       # The admission webhook chain forwards this to each registered webhook
-      # (e.g. contributors-webhook uses agent+client as the append-only set key).
+      # (e.g. the contributors webhook uses agent+client as the append-only set key).
       - X-Memory-Actor-User
       - X-Memory-Actor-Sub
       - X-Memory-Actor-Client

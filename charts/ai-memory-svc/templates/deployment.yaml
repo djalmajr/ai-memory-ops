@@ -16,7 +16,7 @@ spec:
       {{- include "ai-memory-svc.selectorLabels" . | nindent 6 }}
       # See note in templates/service.yaml — must match the Service selector
       # so the main pod is reachable via the Service DNS without other
-      # components (contributors-webhook etc.) tagging along on the
+      # components (contributors / git-mirror webhooks etc.) tagging along on the
       # endpoint list. NB: spec.selector is IMMUTABLE after creation;
       # existing releases will require a helm uninstall+install (or kubectl
       # delete deployment) to pick up this label change.
@@ -117,7 +117,10 @@ spec:
             */}}
             {{- $webhooks := default (list) .Values.aiMemory.admissionWebhooks }}
             {{- if .Values.webhooks.contributors.enabled }}
-            {{- $webhooks = append $webhooks (include "ai-memory-svc.contributorsWebhookEntry" . | fromYaml) }}
+            {{- $webhooks = append $webhooks (include "ai-memory-svc.contributorsEntry" . | fromYaml) }}
+            {{- end }}
+            {{- if and .Values.webhooks.gitMirror .Values.webhooks.gitMirror.enabled }}
+            {{- $webhooks = append $webhooks (include "ai-memory-svc.gitMirrorEntry" . | fromYaml) }}
             {{- end }}
             {{- if $webhooks }}
             - name: AI_MEMORY_ADMISSION_WEBHOOKS_JSON

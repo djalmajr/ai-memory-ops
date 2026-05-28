@@ -1,6 +1,6 @@
-# Build + push the 4 container images of ai-memory-ops to GHCR.
+# Build + push the 5 container images of ai-memory-ops to GHCR.
 #
-# Targets: ghcr.io/djalmajr/ai-memory-ops/{ai-memory,mcp-auth,etl,contributors-webhook}
+# Targets: ghcr.io/djalmajr/ai-memory-ops/{ai-memory,mcp-auth,etl,contributors,git-mirror}
 #
 # Triggers:
 # - push to main when images/** or this workflow change (auto-rebuild on edits)
@@ -54,9 +54,12 @@ jobs:
           - name: etl
             context: images/etl
             dockerfile: images/etl/Dockerfile
-          - name: contributors-webhook
-            context: images/contributors-webhook
-            dockerfile: images/contributors-webhook/Dockerfile
+          - name: contributors
+            context: images/contributors
+            dockerfile: images/contributors/Dockerfile
+          - name: git-mirror
+            context: images/git-mirror
+            dockerfile: images/git-mirror/Dockerfile
     name: build ${{ matrix.image.name }}
     steps:
       # All action versions below run on Node.js 24 (the others are pinned
