@@ -49,8 +49,19 @@ spec:
               value: "0.0.0.0:{{ .Values.webhooks.gitMirror.port | default 8080 }}"
             - name: LOG_LEVEL
               value: {{ .Values.webhooks.gitMirror.logLevel | default "info" | quote }}
+            # REPO_URL — either inline (`repoUrl`) or pulled from a
+            # Secret (`repoUrlSecret: { name, key }`). Use the secret
+            # path when the URL embeds credentials (HTTPS + token).
+            {{- if .Values.webhooks.gitMirror.repoUrlSecret }}
             - name: REPO_URL
-              value: {{ required "webhooks.gitMirror.repoUrl is required when webhooks.gitMirror.enabled=true" .Values.webhooks.gitMirror.repoUrl | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "repoUrlSecret.name required" .Values.webhooks.gitMirror.repoUrlSecret.name }}
+                  key: {{ required "repoUrlSecret.key required" .Values.webhooks.gitMirror.repoUrlSecret.key }}
+            {{- else }}
+            - name: REPO_URL
+              value: {{ required "webhooks.gitMirror.repoUrl OR webhooks.gitMirror.repoUrlSecret is required when webhooks.gitMirror.enabled=true" .Values.webhooks.gitMirror.repoUrl | quote }}
+            {{- end }}
             - name: REPO_BRANCH
               value: {{ .Values.webhooks.gitMirror.repoBranch | default "main" | quote }}
             - name: GIT_USER
@@ -61,19 +72,21 @@ spec:
               value: {{ .Values.webhooks.gitMirror.pushDebounce | default "10s" | quote }}
             - name: WORK_DIR
               value: "/work/repo"
-            # SSH-only auth path: the secret mounts id_ed25519 and
-            # known_hosts at /etc/git-ssh. GIT_SSH_COMMAND points git at
-            # those files; -o IdentitiesOnly avoids leaking unrelated
-            # keys from the agent (there isn't one in this container, but
-            # this is the safe default).
+            {{- if eq (.Values.webhooks.gitMirror.auth | default "ssh") "ssh" }}
+            # SSH auth: secret mounts id_ed25519 + known_hosts at
+            # /etc/git-ssh; GIT_SSH_COMMAND points git at those files.
+            # IdentitiesOnly avoids leaking unrelated keys from any agent.
             - name: GIT_SSH_COMMAND
               value: "ssh -i /etc/git-ssh/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/etc/git-ssh/known_hosts -o StrictHostKeyChecking=yes"
+            {{- end }}
           volumeMounts:
             - name: work
               mountPath: /work
+            {{- if eq (.Values.webhooks.gitMirror.auth | default "ssh") "ssh" }}
             - name: ssh-key
               mountPath: /etc/git-ssh
               readOnly: true
+            {{- end }}
           resources:
             {{- toYaml (.Values.webhooks.gitMirror.resources | default dict) | nindent 12 }}
           livenessProbe:
@@ -98,6 +111,7 @@ spec:
       volumes:
         - name: work
           emptyDir: {}
+        {{- if eq (.Values.webhooks.gitMirror.auth | default "ssh") "ssh" }}
         - name: ssh-key
           secret:
             secretName: {{ .Values.webhooks.gitMirror.sshSecret | default (printf "%s-ssh" (include "ai-memory-svc.gitMirrorFullname" .)) }}
@@ -107,4 +121,5 @@ spec:
                 path: id_ed25519
               - key: known_hosts
                 path: known_hosts
+        {{- end }}
 {{- end }}

@@ -156,9 +156,18 @@ webhooks:
     logLevel: info
     timeoutMs: 2000
     failurePolicy: ignore
-    # REQUIRED when enabled. SSH-only ("git@…:…" form). HTTPS auth isn't
-    # wired up (would need a different secret-mount + GIT_ASKPASS path).
+    # Auth mode. `ssh` (default) mounts a Secret with id_ed25519 +
+    # known_hosts at /etc/git-ssh. `https` skips SSH wiring entirely —
+    # in that case embed credentials directly in repoUrl (or use
+    # repoUrlSecret to keep the token out of `helm get values`).
+    auth: ssh   # ssh | https
+    # REPO_URL — provide ONE of:
+    #   repoUrl:        literal string (visible in `helm get values`/env)
+    #   repoUrlSecret:  { name, key } — read from a pre-existing Secret
+    # When `auth: https` the URL should include credentials, e.g.
+    #   https://oauth2:<token>@gitlab.example.com/owner/repo.git
     repoUrl: ""
+    repoUrlSecret: {}
     repoBranch: main
     # How long to wait for further commits before issuing `git push`.
     # Lower = fresher backup; higher = fewer pushes / less remote chatter.
