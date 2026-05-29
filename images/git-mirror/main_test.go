@@ -91,6 +91,25 @@ func TestRenderPageRoundtripsFrontmatter(t *testing.T) {
 	}
 }
 
+func TestRedactURLMasksCredentials(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// Token in userinfo — the real leak vector (REPO_URL with a gho_ PAT).
+		{"https://x-access-token:gho_secret123@github.com/o/r.git", "https://***@github.com/o/r.git"},
+		{"https://gho_secret123@github.com/o/r.git", "https://***@github.com/o/r.git"},
+		// No credentials — passes through untouched.
+		{"https://github.com/o/r.git", "https://github.com/o/r.git"},
+		{"/work/repo", "/work/repo"},
+		{"git@github.com:o/r.git", "git@github.com:o/r.git"},
+		// An '@' in the path must not be mistaken for userinfo.
+		{"https://github.com/o/r/@weird", "https://github.com/o/r/@weird"},
+	}
+	for _, c := range cases {
+		if got := redactURL(c.in); got != c.want {
+			t.Errorf("redactURL(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func decodePayload(t *testing.T, raw string) payload {
 	t.Helper()
 	var p payload
