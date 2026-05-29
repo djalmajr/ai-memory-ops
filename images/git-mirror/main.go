@@ -159,6 +159,38 @@ func (m *mirror) run(ctx context.Context, name string, args ...string) error {
 	return m.runIn(ctx, m.workDir, name, args...)
 }
 
+// redactURL masks credentials embedded in a URL's userinfo so the backup
+// remote's token (REPO_URL carries a "https://x-access-token:gho_...@github.com/..."
+// PAT) never reaches the logs. The token surfaced in cleartext on the boot
+// "git-mirror listening" line and inside clone errors. Non-URL strings and
+// credential-free URLs pass through unchanged.
+func redactURL(s string) string {
+	i := strings.Index(s, "://")
+	if i < 0 {
+		return s
+	}
+	rest := s[i+3:]
+	at := strings.IndexByte(rest, '@')
+	if at < 0 {
+		return s
+	}
+	// An '@' that comes after the first '/' is in the path, not userinfo.
+	if slash := strings.IndexByte(rest, '/'); slash >= 0 && slash < at {
+		return s
+	}
+	return s[:i+3] + "***@" + rest[at+1:]
+}
+
+// redactArgs returns a copy of args with any embedded URL credentials masked,
+// for safe inclusion in log/error messages (clone/remote-add carry REPO_URL).
+func redactArgs(args []string) []string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = redactURL(a)
+	}
+	return out
+}
+
 func (m *mirror) runIn(ctx context.Context, dir, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
@@ -166,10 +198,10 @@ func (m *mirror) runIn(ctx context.Context, dir, name string, args ...string) er
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(redactArgs(args), " "), err, strings.TrimSpace(string(out)))
 	}
 	if len(out) > 0 {
-		slog.Debug("cmd ok", "cmd", name, "args", args, "out", strings.TrimSpace(string(out)))
+		slog.Debug("cmd ok", "cmd", name, "args", redactArgs(args), "out", strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -415,7 +447,7 @@ func main() {
 	}
 
 	go func() {
-		slog.Info("git-mirror listening", "addr", addr, "repo", m.repoURL, "branch", m.branch)
+		slog.Info("git-mirror listening", "addr", addr, "repo", redactURL(m.repoURL), "branch", m.branch)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "err", err)
 			os.Exit(1)
