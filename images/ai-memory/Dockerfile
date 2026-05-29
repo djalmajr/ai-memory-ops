@@ -25,9 +25,7 @@ ARG AI_MEMORY_REPO=https://github.com/djalmajr/ai-memory.git
 #   --build-arg AI_MEMORY_REF=main                         # plain fork main
 ARG AI_MEMORY_REF=deploy
 ARG AI_MEMORY_UI_REPO=https://github.com/djalmajr/ai-memory-ui.git
-# TEMP: preview the cross-project dependency graph view. Revert to `main`
-# once feat/cross-project-graph merges into ai-memory-ui's main.
-ARG AI_MEMORY_UI_REF=feat/cross-project-graph
+ARG AI_MEMORY_UI_REF=main
 
 # ---------------------------------------------------------------------------
 # 1) SPA (SolidJS) → /ui/dist
