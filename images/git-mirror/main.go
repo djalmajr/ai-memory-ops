@@ -257,6 +257,71 @@ func (m *mirror) writePage(ctx context.Context, p payload) error {
 	return nil
 }
 
+// deletePage removes a single page from the working tree and commits the
+// removal. Mirrors the engine's `op=delete` admission notify (path only,
+// no body). Idempotent: a path that isn't tracked is a no-op.
+func (m *mirror) deletePage(ctx context.Context, p payload) error {
+	if p.Page.Path == "" {
+		return errors.New("page.path empty")
+	}
+	workspace := defaultStr(p.Ctx.Workspace, "default")
+	project := defaultStr(p.Ctx.Project, "_unscoped")
+	rel := filepath.Join("wiki", workspace, project, filepath.Clean(p.Page.Path))
+	full, err := safeJoin(m.workDir, rel)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	relPath, _ := filepath.Rel(m.workDir, full)
+	// `--ignore-unmatch` keeps the op idempotent when the engine replays a
+	// delete for a page the mirror never had (e.g. created before the
+	// mirror was enabled).
+	if err := m.run(ctx, "git", "rm", "-f", "--ignore-unmatch", relPath); err != nil {
+		return fmt.Errorf("git rm: %w", err)
+	}
+	return m.commitDirty(ctx, changeMessage("delete", p, relPath))
+}
+
+// purgeProject removes a whole project subtree from the working tree and
+// commits it. Mirrors the engine's `op=purge_project` notify (no page path;
+// the project comes from ctx). Idempotent.
+func (m *mirror) purgeProject(ctx context.Context, p payload) error {
+	workspace := defaultStr(p.Ctx.Workspace, "default")
+	project := defaultStr(p.Ctx.Project, "_unscoped")
+	rel := filepath.Join("wiki", workspace, project)
+	full, err := safeJoin(m.workDir, rel)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	relPath, _ := filepath.Rel(m.workDir, full)
+	if err := m.run(ctx, "git", "rm", "-rf", "--ignore-unmatch", relPath); err != nil {
+		return fmt.Errorf("git rm -rf: %w", err)
+	}
+	return m.commitDirty(ctx, changeMessage("purge", p, relPath))
+}
+
+// commitDirty commits the currently-staged change and signals the push
+// loop. A no-op staging area (engine replayed an already-applied removal)
+// is treated as success. Callers hold m.mu.
+func (m *mirror) commitDirty(ctx context.Context, msg string) error {
+	if err := m.run(ctx, "git", "commit", "-m", msg); err != nil {
+		if strings.Contains(err.Error(), "nothing to commit") {
+			return nil
+		}
+		return fmt.Errorf("git commit: %w", err)
+	}
+	m.dirty = true
+	m.dirtyCond.Signal()
+	return nil
+}
+
 func defaultStr(v, d string) string {
 	if v == "" {
 		return d
@@ -303,6 +368,12 @@ func renderPage(p payload) []byte {
 }
 
 func commitMessage(p payload, rel string) string {
+	return changeMessage("sync", p, rel)
+}
+
+// changeMessage builds a commit message "<verb> <rel>\n\nby: <actor>" for
+// any working-tree change (sync/delete/purge).
+func changeMessage(verb string, p payload, rel string) string {
 	who := p.Ctx.Actor.User
 	if who == "" {
 		who = p.Ctx.Actor.Agent
@@ -310,7 +381,7 @@ func commitMessage(p payload, rel string) string {
 	if who == "" {
 		who = "anonymous"
 	}
-	return fmt.Sprintf("sync %s\n\nby: %s", rel, who)
+	return fmt.Sprintf("%s %s\n\nby: %s", verb, rel, who)
 }
 
 // pushLoop runs forever, debouncing commits into batched pushes. It waits
@@ -390,11 +461,24 @@ func (m *mirror) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Engine waits for our response synchronously inside admission. We
-	// keep it tight: write+commit, push is async. failure_policy=ignore
-	// in the chart means even a write error won't block the engine.
-	if err := m.writePage(r.Context(), in); err != nil {
-		slog.Warn("mirror write failed", "path", in.Page.Path, "err", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// keep it tight: mutate working tree + commit, push is async.
+	// failure_policy=ignore in the chart means even an error won't block
+	// the engine. The lifecycle op rides in the `X-Memory-Op` header
+	// (see engine `crate::admission::AdmissionOp`); an empty/unknown op
+	// falls back to the write path for backward compatibility.
+	op := r.Header.Get("X-Memory-Op")
+	var opErr error
+	switch op {
+	case "delete":
+		opErr = m.deletePage(r.Context(), in)
+	case "purge_project":
+		opErr = m.purgeProject(r.Context(), in)
+	default:
+		opErr = m.writePage(r.Context(), in)
+	}
+	if opErr != nil {
+		slog.Warn("mirror sync failed", "op", op, "path", in.Page.Path, "err", opErr)
+		http.Error(w, opErr.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

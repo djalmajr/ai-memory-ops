@@ -105,4 +105,6 @@ failure_policy: {{ .Values.webhooks.gitMirror.failurePolicy | default "ignore" }
 events:
   - write_page
   - consolidate
+  - delete
+  - purge_project
 {{- end }}
