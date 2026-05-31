@@ -163,6 +163,11 @@ webhooks:
     logLevel: info
     timeoutMs: 2000
     failurePolicy: ignore
+    # Fire-and-forget delivery (default). The mirror only copies pages, so
+    # the engine dispatches the webhook AFTER the write without awaiting the
+    # git push — keeps writes (and bulk migrations like move-project) fast.
+    # Set true to make writes block until the mirror responds.
+    blocking: false
     # Auth mode. `ssh` (default) mounts a Secret with id_ed25519 +
     # known_hosts at /etc/git-ssh. `https` skips SSH wiring entirely —
     # in that case embed credentials directly in repoUrl (or use

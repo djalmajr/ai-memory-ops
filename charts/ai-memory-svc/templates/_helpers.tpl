@@ -128,6 +128,10 @@ name: git-mirror
 url: http://{{ include "ai-memory-svc.gitMirrorFullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.webhooks.gitMirror.port | default 8080 }}/sync
 timeout_ms: {{ .Values.webhooks.gitMirror.timeoutMs | default 2000 }}
 failure_policy: {{ .Values.webhooks.gitMirror.failurePolicy | default "ignore" }}
+# Fire-and-forget: the mirror only copies pages (never mutates/rejects), so the
+# engine must not block writes waiting on the git push. Set
+# `webhooks.gitMirror.blocking=true` to restore synchronous behaviour.
+blocking: {{ .Values.webhooks.gitMirror.blocking | default false }}
 events:
   - write_page
   - consolidate
