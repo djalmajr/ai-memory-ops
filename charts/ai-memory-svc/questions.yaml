@@ -1,140 +1,327 @@
-# ai-memory-svc Helm Chart — Rancher UI Questions
+# ai-memory-svc — Rancher UI Questions
 #
-# Reference pattern: ~/<buntime-repo>/charts/questions.base.yaml
-# Documentation: https://rancher.com/docs/rancher/v2.6/en/helm-charts/chart-yaml/#questions-yaml-yml
+# Docs: https://ranchermanager.docs.rancher.com/.../helm-charts-in-rancher/create-apps
+# Each `variable` maps 1:1 to a path in values.yaml. `group` → tabs in the catalog form.
 #
-# Each `variable` maps directly to a path in `values.yaml`.
-# Groups are displayed as tabs in the Rancher catalog form.
+# NOTE: this file is kept in sync with values.yaml. When adding a value that an
+# operator should set visually in Rancher, add the matching question here.
 
 questions:
 
-  # ==================== Wiki Configuration ====================
-  - variable: config.wiki.repoUrl
-    label: "Wiki Content Repository URL"
-    description: "Git URL of the wiki-content repo (ETL target). In prod it points to the internal GitLab."
+  # ==================== Images & Registry ====================
+  - variable: aiMemory.image.repository
+    label: "ai-memory Image Repository"
+    description: "Engine image. Default: GHCR (published by CI). Mirror into the client's registry if egress to ghcr.io is blocked."
     type: string
     required: true
-    default: "http://gitlab.example.com/my-org/ai-memory-content.git"
-    group: "Wiki Configuration"
-
-  - variable: config.wiki.branch
-    label: "Wiki Branch"
-    description: "Target branch of the wiki-content (direct push, no MR in the pilot)."
+    default: "ghcr.io/djalmajr/ai-memory-ops/ai-memory"
+    group: "Images & Registry"
+  - variable: aiMemory.image.tag
+    label: "ai-memory Image Tag"
+    description: "Use a pinned sha-<short> tag from CI in production; 'latest' only for trials."
     type: string
-    default: "main"
-    group: "Wiki Configuration"
-
-  - variable: config.language
-    label: "Wiki Language"
-    description: "Content language. Read by the wiki-ingest and wiki-lint skills via .wiki-guardrails.yml."
-    type: enum
-    default: "pt-BR"
-    options:
-      - "pt-BR"
-      - "en"
-      - "es"
-    group: "Wiki Configuration"
-
-  - variable: config.openCode.model
-    label: "OpenCode Model"
-    description: "Model used by the OpenCode CLI during the ingest (e.g. kimi-k2.6, claude-sonnet-4)."
+    required: true
+    default: "latest"
+    group: "Images & Registry"
+  - variable: mcpAuth.image.repository
+    label: "mcp-auth Image Repository"
+    description: "JWT validator sidecar. Ingress-agnostic (Traefik forwardAuth + nginx auth_request)."
     type: string
-    default: "kimi-k2.6"
-    group: "Wiki Configuration"
-
-  # ==================== MCP Server ====================
-  - variable: mcp.image.repository
-    label: "MCP Image Repository"
-    description: "MCP server image. The pilot uses nginx as a placeholder until the real MCP chart."
+    default: "ghcr.io/djalmajr/ai-memory-ops/mcp-auth"
+    group: "Images & Registry"
+    show_if: "mcpAuth.enabled=true"
+  - variable: mcpAuth.image.tag
+    label: "mcp-auth Image Tag"
     type: string
-    default: "nginx"
-    group: "MCP Server"
-
-  - variable: mcp.image.tag
-    label: "MCP Image Tag"
-    type: string
-    default: "1.27-alpine"
-    group: "MCP Server"
-
-  - variable: mcp.port
-    label: "MCP Port"
-    description: "Internal port of the MCP container."
-    type: int
-    default: 8080
-    min: 1024
-    max: 65535
-    group: "MCP Server"
-
-  - variable: mcp.resources.requests.cpu
-    label: "MCP CPU Request"
-    type: string
-    default: "100m"
-    group: "MCP Server"
-
-  - variable: mcp.resources.requests.memory
-    label: "MCP Memory Request"
-    type: string
-    default: "256Mi"
-    group: "MCP Server"
-
-  - variable: mcp.resources.limits.cpu
-    label: "MCP CPU Limit"
-    type: string
-    default: "1"
-    group: "MCP Server"
-
-  - variable: mcp.resources.limits.memory
-    label: "MCP Memory Limit"
-    type: string
-    default: "1Gi"
-    group: "MCP Server"
-
-  # ==================== ETL Pipeline ====================
-  - variable: etl.enabled
-    label: "Enable ETL Sidecar"
-    description: "Enables the etl-cron sidecar with supercronic. Keep it off if there is no real image yet."
-    type: boolean
-    default: false
-    group: "ETL Pipeline"
-
-  - variable: etl.schedule
-    label: "ETL Cron Schedule"
-    description: "5-field cron (supercronic). E.g. '0 0 * * *' for daily at 00:00."
-    type: string
-    default: "0 0 * * *"
-    group: "ETL Pipeline"
-
+    default: "latest"
+    group: "Images & Registry"
+    show_if: "mcpAuth.enabled=true"
   - variable: etl.image.repository
     label: "ETL Image Repository"
-    description: "ETL image. In the lab it uses the internal registry (registry.example.com); in prod, Nexus."
     type: string
-    required: true
-    default: "registry.example.com/ai-memory-svc-etl"
-    group: "ETL Pipeline"
-
+    default: "ghcr.io/djalmajr/ai-memory-ops/etl"
+    group: "Images & Registry"
+    show_if: "etl.enabled=true"
   - variable: etl.image.tag
     label: "ETL Image Tag"
     type: string
-    required: true
-    default: "0.1.0-rc1"
-    group: "ETL Pipeline"
+    default: "latest"
+    group: "Images & Registry"
+    show_if: "etl.enabled=true"
+  - variable: imagePullSecrets
+    label: "Image Pull Secrets"
+    description: "Comma-free YAML list of {name: <secret>} entries. Needed only if the registry is private to the cluster."
+    type: string
+    default: "[]"
+    group: "Images & Registry"
 
+  # ==================== ai-memory Engine ====================
+  - variable: aiMemory.workspace
+    label: "Workspace"
+    description: "Canonical workspace name. Projects map to ingested sources."
+    type: string
+    required: true
+    default: "my-org"
+    group: "ai-memory Engine"
+  - variable: aiMemory.project
+    label: "Bootstrap Project (seed row)"
+    description: "Names the seed project row created on boot. Empty falls back to 'scratch' (shows as a stray empty project in the UI)."
+    type: string
+    default: "default"
+    group: "ai-memory Engine"
+  - variable: aiMemory.enableWeb
+    label: "Enable Web UI (/web + /api/v1)"
+    type: boolean
+    default: true
+    group: "ai-memory Engine"
+  - variable: aiMemory.httpStateful
+    label: "HTTP Stateful Sessions"
+    description: "Off = stateless (simple curl/HTTP clients). On = requires mcp-remote-style session handling."
+    type: boolean
+    default: false
+    group: "ai-memory Engine"
+  - variable: aiMemory.logLevel
+    label: "Log Level (RUST_LOG)"
+    type: string
+    default: "ai_memory=info,ai_memory_web=info,ai_memory_mcp=info"
+    group: "ai-memory Engine"
+  - variable: aiMemory.resources.requests.cpu
+    label: "CPU Request"
+    type: string
+    default: "100m"
+    group: "ai-memory Engine"
+  - variable: aiMemory.resources.requests.memory
+    label: "Memory Request"
+    type: string
+    default: "256Mi"
+    group: "ai-memory Engine"
+  - variable: aiMemory.resources.limits.cpu
+    label: "CPU Limit"
+    type: string
+    default: "1500m"
+    group: "ai-memory Engine"
+  - variable: aiMemory.resources.limits.memory
+    label: "Memory Limit"
+    type: string
+    default: "2Gi"
+    group: "ai-memory Engine"
+
+  # ==================== LLM & Embeddings ====================
+  - variable: aiMemory.llm.provider
+    label: "LLM Provider"
+    description: "Empty = zero-LLM (rule-based consolidation/lint). E.g. 'openai-compat'."
+    type: string
+    default: ""
+    group: "LLM & Embeddings"
+  - variable: aiMemory.llm.baseUrl
+    label: "LLM Base URL"
+    type: string
+    default: ""
+    group: "LLM & Embeddings"
+    show_if: "aiMemory.llm.provider!="
+  - variable: aiMemory.llm.model
+    label: "LLM Model"
+    type: string
+    default: ""
+    group: "LLM & Embeddings"
+    show_if: "aiMemory.llm.provider!="
+  - variable: aiMemory.embedding.provider
+    label: "Embedding Provider"
+    description: "Empty = FTS5-only (no vector search)."
+    type: string
+    default: ""
+    group: "LLM & Embeddings"
+  - variable: aiMemory.embedding.baseUrl
+    label: "Embedding Base URL"
+    type: string
+    default: ""
+    group: "LLM & Embeddings"
+    show_if: "aiMemory.embedding.provider!="
+  - variable: aiMemory.embedding.model
+    label: "Embedding Model"
+    type: string
+    default: ""
+    group: "LLM & Embeddings"
+    show_if: "aiMemory.embedding.provider!="
+  - variable: aiMemory.embedding.dim
+    label: "Embedding Dimension"
+    type: string
+    default: ""
+    group: "LLM & Embeddings"
+    show_if: "aiMemory.embedding.provider!="
+
+  # ==================== Networking & Ingress ====================
+  - variable: service.type
+    label: "Service Type"
+    type: enum
+    default: "ClusterIP"
+    options: ["ClusterIP", "NodePort", "LoadBalancer"]
+    group: "Networking & Ingress"
+  - variable: service.port
+    label: "Service Port"
+    type: int
+    default: 49374
+    min: 1
+    max: 65535
+    group: "Networking & Ingress"
+  - variable: ingress.enabled
+    label: "Enable Ingress"
+    type: boolean
+    default: false
+    group: "Networking & Ingress"
+  - variable: ingress.className
+    label: "Ingress Class"
+    description: "auto = detect Traefik CRD, else nginx. Force traefik/nginx to override. The edge-auth wiring follows the resolved backend automatically."
+    type: enum
+    default: "auto"
+    options: ["auto", "nginx", "traefik"]
+    group: "Networking & Ingress"
+    show_if: "ingress.enabled=true"
+  - variable: ingress.host
+    label: "Ingress Hostname"
+    description: "Public hostname, no scheme/path. Auto-added to the engine's allowed-hosts list."
+    type: hostname
+    default: ""
+    group: "Networking & Ingress"
+    show_if: "ingress.enabled=true"
+  - variable: ingress.path
+    label: "Ingress Base Path"
+    description: "'/' for a dedicated host (recommended) or '/wiki' for path-based (engine routes are stripped to root)."
+    type: string
+    default: "/"
+    group: "Networking & Ingress"
+    show_if: "ingress.enabled=true"
+  - variable: ingress.stripPathPrefix
+    label: "Strip Path Prefix"
+    description: "When path is not '/', strip it before the backend (the engine serves /mcp, /web at root)."
+    type: boolean
+    default: false
+    group: "Networking & Ingress"
+    show_if: "ingress.enabled=true"
+  - variable: ingress.maxBodySize
+    label: "Max Request Body Size"
+    description: "nginx only. E.g. 100m, 0 = unlimited."
+    type: string
+    default: ""
+    group: "Networking & Ingress"
+    show_if: "ingress.enabled=true"
+  - variable: ingress.tls.enabled
+    label: "Enable TLS"
+    description: "Requires cert-manager + a ClusterIssuer (or a pre-created TLS secret)."
+    type: boolean
+    default: true
+    group: "Networking & Ingress"
+    show_if: "ingress.enabled=true"
+  - variable: ingress.tls.secretName
+    label: "TLS Secret Name"
+    description: "Leave empty for the chart default (<release>-tls)."
+    type: string
+    default: ""
+    group: "Networking & Ingress"
+    show_if: "ingress.tls.enabled=true&&ingress.enabled=true"
+
+  # ==================== Authentication ====================
+  - variable: mcpAuth.enabled
+    label: "Enable mcp-auth (JWT gateway for /mcp)"
+    description: "Validates OIDC/Keycloak JWTs at the edge. Requires the OIDC issuer below."
+    type: boolean
+    default: false
+    group: "Authentication"
+  - variable: mcpAuth.oidc.issuer
+    label: "OIDC Issuer"
+    description: "REQUIRED when enabled. E.g. https://keycloak.example.com/realms/ai-memory-svc"
+    type: string
+    default: ""
+    group: "Authentication"
+    show_if: "mcpAuth.enabled=true"
+  - variable: mcpAuth.oidc.audience
+    label: "OIDC Audience"
+    description: "Optional. Expected 'aud' claim; empty = not checked."
+    type: string
+    default: ""
+    group: "Authentication"
+    show_if: "mcpAuth.enabled=true"
+  - variable: mcpAuth.oauth.enabled
+    label: "Serve OAuth Protected-Resource Metadata (RFC 9728)"
+    description: "Emits WWW-Authenticate + /.well-known so MCP clients self-discover Keycloak (Auth Code + PKCE)."
+    type: boolean
+    default: false
+    group: "Authentication"
+    show_if: "mcpAuth.enabled=true"
+  - variable: oauth2Proxy.enabled
+    label: "Enable oauth2-proxy (browser login for /web)"
+    description: "Interactive OIDC login for browsers. Requires the config + CA secrets provisioned out-of-band."
+    type: boolean
+    default: false
+    group: "Authentication"
+  - variable: oauth2Proxy.redirectUrl
+    label: "oauth2-proxy Redirect URL"
+    description: "E.g. https://memory.example.com/oauth2/callback"
+    type: string
+    default: ""
+    group: "Authentication"
+    show_if: "oauth2Proxy.enabled=true"
+  - variable: oauth2Proxy.configSecretName
+    label: "oauth2-proxy Config Secret"
+    description: "Pre-existing Secret with oauth2-proxy.yaml (alpha-config) + cookie-secret."
+    type: string
+    default: "oauth2-proxy-config"
+    group: "Authentication"
+    show_if: "oauth2Proxy.enabled=true"
+  - variable: oauth2Proxy.caSecretName
+    label: "oauth2-proxy CA Secret"
+    description: "Pre-existing Secret with ca.crt (to trust a self-signed Keycloak)."
+    type: string
+    default: "oauth2-proxy-ca"
+    group: "Authentication"
+    show_if: "oauth2Proxy.enabled=true"
+
+  # ==================== ETL Pipeline ====================
+  - variable: etl.enabled
+    label: "Enable ETL CronJob"
+    description: "Periodically ingests source repos into ai-memory wiki pages."
+    type: boolean
+    default: true
+    group: "ETL Pipeline"
+  - variable: etl.schedule
+    label: "ETL Cron Schedule"
+    description: "5-field cron. E.g. '0 0 * * *' = daily 00:00."
+    type: string
+    default: "0 0 * * *"
+    group: "ETL Pipeline"
+    show_if: "etl.enabled=true"
+  - variable: etl.suspend
+    label: "Suspend Scheduling (on-demand only)"
+    type: boolean
+    default: false
+    group: "ETL Pipeline"
+    show_if: "etl.enabled=true"
   - variable: etl.runIndexer
-    label: "Run Indexer on ETL"
-    description: "If true, the ETL script also runs the indexer (SQLite rebuild) at the end."
+    label: "Run Indexer After ETL"
+    description: "Runs 'ai-memory embed' at the end (needs embeddings configured)."
     type: boolean
     default: true
     group: "ETL Pipeline"
     show_if: "etl.enabled=true"
-
+  - variable: config.language
+    label: "Content Language"
+    type: enum
+    default: "pt-BR"
+    options: ["pt-BR", "en", "es"]
+    group: "ETL Pipeline"
+    show_if: "etl.enabled=true"
+  - variable: config.openCode.model
+    label: "OpenCode Model"
+    type: string
+    default: "opencode-go/kimi-k2.6"
+    group: "ETL Pipeline"
+    show_if: "etl.enabled=true"
   - variable: etl.git.userName
     label: "ETL Git Author Name"
-    description: "Identity of the bot that commits to the wiki-content."
     type: string
     default: "ai-memory-bot"
     group: "ETL Pipeline"
     show_if: "etl.enabled=true"
-
   - variable: etl.git.userEmail
     label: "ETL Git Author Email"
     type: string
@@ -143,209 +330,92 @@ questions:
     show_if: "etl.enabled=true"
 
   # ==================== Persistence ====================
-  - variable: persistence.accessMode
-    label: "PVC Access Mode"
-    description: "RWO supports the topology (SQLite WAL with 1 writer + N readers). RWX is not required."
-    type: enum
-    default: "ReadWriteOnce"
-    options:
-      - "ReadWriteOnce"
-      - "ReadWriteMany"
-    group: "Persistence"
-
   - variable: persistence.storageClass
     label: "Storage Class"
-    description: "Storage class of the PVC. Leave empty to use the cluster default, or select a specific one (e.g. gp3, oci-bv, csi-cinder, local-path, longhorn)."
+    description: "Empty = cluster default. On the Serpro/Oracle cluster the default is 'oci-bv' (RWO)."
     type: storageclass
     default: ""
     group: "Persistence"
-
+  - variable: persistence.accessMode
+    label: "PVC Access Mode"
+    description: "RWO fits the topology (SQLite WAL, single writer). RWX not required."
+    type: enum
+    default: "ReadWriteOnce"
+    options: ["ReadWriteOnce", "ReadWriteMany"]
+    group: "Persistence"
   - variable: persistence.size
     label: "Volume Size"
-    description: "Space for SQLite, the wiki clone, and the GGUF models cache."
+    description: "Space for SQLite, the wiki git clone, and the model cache."
     type: string
     default: "20Gi"
     group: "Persistence"
 
-  # ==================== Networking ====================
-  - variable: service.type
-    label: "Service Type"
-    type: enum
-    default: "ClusterIP"
-    options:
-      - "ClusterIP"
-      - "NodePort"
-      - "LoadBalancer"
-    group: "Networking"
-
-  - variable: service.port
-    label: "Service Port"
-    type: int
-    default: 8080
-    min: 1
-    max: 65535
-    group: "Networking"
-
-  - variable: ingress.enabled
-    label: "Enable Ingress"
-    description: "Enables exposure via Ingress (Traefik in the lab, ingress-nginx in prod)."
-    type: boolean
-    default: false
-    group: "Networking"
-
-  - variable: ingress.className
-    label: "Ingress Class"
-    type: enum
-    default: "traefik"
-    options:
-      - "traefik"
-      - "nginx"
-    group: "Networking"
-    show_if: "ingress.enabled=true"
-
-  - variable: ingress.host
-    label: "Ingress Hostname"
-    description: "Public hostname (without protocol/path). E.g. platform.example.com (lab), example.com (prod)."
-    type: hostname
-    default: "platform.example.com"
-    group: "Networking"
-    show_if: "ingress.enabled=true"
-
-  - variable: ingress.path
-    label: "Ingress Path"
-    description: "Base path. '/' for hostname-only or '/wiki' for path-based."
-    type: string
-    default: "/wiki"
-    group: "Networking"
-    show_if: "ingress.enabled=true"
-
-  - variable: ingress.maxBodySize
-    label: "Max Request Body Size"
-    description: "E.g. 100m, 0 for no limit. Applies only with className=nginx."
-    type: string
-    default: ""
-    group: "Networking"
-    show_if: "ingress.enabled=true"
-
-  - variable: ingress.tls.enabled
-    label: "Enable TLS"
-    description: "Enables HTTPS. Requires cert-manager + ClusterIssuer configured."
-    type: boolean
-    default: true
-    group: "Networking"
-    show_if: "ingress.enabled=true"
-
-  # ==================== Secrets (dev only) ====================
-  - variable: secrets.create
-    label: "Create Secret in chart (dev only)"
-    description: "In prod, keep it false and provision the Secret externally (runbooks/secrets-bootstrap.md)."
-    type: boolean
-    default: false
-    group: "Secrets"
-
-  - variable: secrets.gitlabToken
-    label: "GitLab API Token"
-    description: "Token with read_repository + write_repository scope on the wiki-content."
-    type: password
-    group: "Secrets"
-    show_if: "secrets.create=true"
-
-  - variable: secrets.openCodeKey
-    label: "OpenCode API Key"
-    description: "OpenCode plan key (used by the ETL to call kimi-k2.6)."
-    type: password
-    group: "Secrets"
-    show_if: "secrets.create=true"
-
-  - variable: secrets.mcpAuthToken
-    label: "MCP Auth Token"
-    description: "Bearer token validated by the MCP server."
-    type: password
-    group: "Secrets"
-    show_if: "secrets.create=true"
-
   # ==================== Admission Webhooks ====================
   - variable: webhooks.contributors.enabled
     label: "Enable contributors webhook"
-    description: "When on, each page write is enriched with the writing agent (claude-code/codex/...), user, and DCR client UUID in frontmatter.contributors (append-only set keyed by agent+client). Auto-registers in the engine's admission chain via a helper template (no wiring needed)."
+    description: "Stamps each write with the writing agent/user/client in frontmatter.contributors. Auto-registers in the engine's admission chain."
     type: boolean
     default: false
     group: "Admission Webhooks"
-
   - variable: webhooks.contributors.image.repository
     label: "contributors image"
-    description: "Container image for the contributors webhook service."
     type: string
     default: "ghcr.io/djalmajr/ai-memory-ops/contributors"
     group: "Admission Webhooks"
     show_if: "webhooks.contributors.enabled=true"
-
   - variable: webhooks.contributors.image.tag
     label: "contributors tag"
-    description: "Image tag (use sha-<short> from CI for pinning, or latest)."
     type: string
     default: "latest"
     group: "Admission Webhooks"
     show_if: "webhooks.contributors.enabled=true"
-
   - variable: webhooks.contributors.failurePolicy
     label: "contributors failure policy"
-    description: "What the engine does when the webhook fails. ignore (safer): logs+skips, page still writes. reject: aborts the write - use only for safety-critical webhooks."
     type: enum
     default: "ignore"
-    options:
-      - "ignore"
-      - "reject"
+    options: ["ignore", "reject"]
     group: "Admission Webhooks"
     show_if: "webhooks.contributors.enabled=true"
-
   - variable: webhooks.gitMirror.enabled
     label: "Enable git-mirror webhook"
-    description: "When on, every page write is mirrored as a commit to an external git repo (backup/audit). Requires an SSH deploy key Secret (default name: <release>-git-mirror-ssh with keys id_ed25519 + known_hosts)."
+    description: "Mirrors every page write as a commit to an external git repo (backup/audit)."
     type: boolean
     default: false
     group: "Admission Webhooks"
-
+  - variable: webhooks.gitMirror.auth
+    label: "git-mirror auth mode"
+    description: "ssh = mount a deploy-key Secret. https = embed credentials in the repo URL."
+    type: enum
+    default: "ssh"
+    options: ["ssh", "https"]
+    group: "Admission Webhooks"
+    show_if: "webhooks.gitMirror.enabled=true"
   - variable: webhooks.gitMirror.repoUrl
     label: "git-mirror remote URL"
-    description: "SSH git remote (e.g. git@gitlab.djalmajr.dev:djalmajr/ai-memory-bkp.git). Only SSH auth is wired up."
+    description: "SSH (git@host:owner/repo.git) or HTTPS with credentials, per the auth mode."
     type: string
     default: ""
     group: "Admission Webhooks"
     show_if: "webhooks.gitMirror.enabled=true"
-
   - variable: webhooks.gitMirror.repoBranch
     label: "git-mirror branch"
-    description: "Branch to push to (created on first push if it doesn't exist)."
     type: string
     default: "main"
     group: "Admission Webhooks"
     show_if: "webhooks.gitMirror.enabled=true"
-
   - variable: webhooks.gitMirror.sshSecret
     label: "git-mirror SSH secret name"
-    description: "Pre-existing Secret with keys id_ed25519 + known_hosts. Leave empty to use the chart default (<release>-git-mirror-ssh)."
+    description: "Secret with id_ed25519 + known_hosts. Empty = chart default (<release>-git-mirror-ssh)."
     type: string
     default: ""
     group: "Admission Webhooks"
-    show_if: "webhooks.gitMirror.enabled=true"
-
-  - variable: webhooks.gitMirror.pushDebounce
-    label: "git-mirror push debounce"
-    description: "How long to wait for further commits to coalesce before pushing. Lower = fresher backup; higher = fewer pushes."
-    type: string
-    default: "10s"
-    group: "Admission Webhooks"
-    show_if: "webhooks.gitMirror.enabled=true"
-
+    show_if: "webhooks.gitMirror.enabled=true&&webhooks.gitMirror.auth=ssh"
   - variable: webhooks.gitMirror.image.repository
     label: "git-mirror image"
-    description: "Container image for the git-mirror webhook service."
     type: string
     default: "ghcr.io/djalmajr/ai-memory-ops/git-mirror"
     group: "Admission Webhooks"
     show_if: "webhooks.gitMirror.enabled=true"
-
   - variable: webhooks.gitMirror.image.tag
     label: "git-mirror tag"
     type: string
@@ -353,13 +423,56 @@ questions:
     group: "Admission Webhooks"
     show_if: "webhooks.gitMirror.enabled=true"
 
-  - variable: webhooks.gitMirror.failurePolicy
-    label: "git-mirror failure policy"
-    description: "Recommended: ignore — backup must never block the engine."
-    type: enum
-    default: "ignore"
-    options:
-      - "ignore"
-      - "reject"
-    group: "Admission Webhooks"
-    show_if: "webhooks.gitMirror.enabled=true"
+  # ==================== Monitoring ====================
+  - variable: monitoring.capacity.enabled
+    label: "Enable capacity report CronJob"
+    description: "Periodic /data usage report."
+    type: boolean
+    default: false
+    group: "Monitoring"
+  - variable: monitoring.capacity.schedule
+    label: "Capacity report schedule"
+    type: string
+    default: "0 */6 * * *"
+    group: "Monitoring"
+    show_if: "monitoring.capacity.enabled=true"
+
+  # ==================== Secrets (dev only) ====================
+  # In production keep secrets.create=false and provision the Secret out-of-band
+  # (see README / runbooks). These fields exist only for quick dev installs.
+  - variable: secrets.create
+    label: "Create Secret in chart (dev only)"
+    description: "Production: keep FALSE and create <release>-secrets externally (AI_MEMORY_AUTH_TOKEN, LLM_API_KEY, OPENAI_API_KEY)."
+    type: boolean
+    default: false
+    group: "Secrets (dev only)"
+  - variable: secrets.aiMemoryAuthToken
+    label: "AI_MEMORY_AUTH_TOKEN"
+    type: password
+    default: ""
+    group: "Secrets (dev only)"
+    show_if: "secrets.create=true"
+  - variable: secrets.llmApiKey
+    label: "LLM_API_KEY"
+    type: password
+    default: ""
+    group: "Secrets (dev only)"
+    show_if: "secrets.create=true"
+  - variable: secrets.embeddingApiKey
+    label: "OPENAI_API_KEY (embeddings)"
+    type: password
+    default: ""
+    group: "Secrets (dev only)"
+    show_if: "secrets.create=true"
+  - variable: secrets.gitlabToken
+    label: "GITLAB_API_TOKEN (ETL)"
+    type: password
+    default: ""
+    group: "Secrets (dev only)"
+    show_if: "secrets.create=true"
+  - variable: secrets.openCodeKey
+    label: "OPENCODE_API_KEY (ETL)"
+    type: password
+    default: ""
+    group: "Secrets (dev only)"
+    show_if: "secrets.create=true"

@@ -103,6 +103,48 @@ func TestVerifyChallengeNoopWhenDisabled(t *testing.T) {
 	}
 }
 
+// nginx-ingress auth_request sends X-Original-Method + an absolute X-Original-URL
+// instead of the Traefik X-Forwarded-* pair. forwardedRoute must normalize both.
+func TestForwardedRouteNginxHeaders(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/verify", nil)
+	req.Header.Set("X-Original-Method", "POST")
+	req.Header.Set("X-Original-URL", "https://memory.example.com/wiki/mcp/write/foo?x=1")
+	method, uri := forwardedRoute(req)
+	if method != "POST" {
+		t.Errorf("method = %q, want POST", method)
+	}
+	if uri != "/wiki/mcp/write/foo?x=1" {
+		t.Errorf("uri = %q, want /wiki/mcp/write/foo?x=1", uri)
+	}
+}
+
+// Traefik headers take precedence and are returned as-is.
+func TestForwardedRouteTraefikHeaders(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/verify", nil)
+	req.Header.Set("X-Forwarded-Method", "GET")
+	req.Header.Set("X-Forwarded-Uri", "/wiki/mcp")
+	method, uri := forwardedRoute(req)
+	if method != "GET" || uri != "/wiki/mcp" {
+		t.Errorf("got (%q,%q), want (GET,/wiki/mcp)", method, uri)
+	}
+}
+
+// The missing-bearer challenge path must also work when only nginx headers are present.
+func TestVerifyMissingBearerNginxHeaders(t *testing.T) {
+	setupOAuth()
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("X-Original-Method", "POST")
+	req.Header.Set("X-Original-URL", "https://memory.example.com/wiki/mcp")
+	rec := httptest.NewRecorder()
+	handleVerify(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if wa := rec.Header().Get("WWW-Authenticate"); !strings.Contains(wa, "resource_metadata=") {
+		t.Errorf("WWW-Authenticate = %q, want resource_metadata challenge", wa)
+	}
+}
+
 func TestWellKnownIsPublicPath(t *testing.T) {
 	cases := map[string]bool{
 		"/wiki/.well-known/oauth-protected-resource": true,

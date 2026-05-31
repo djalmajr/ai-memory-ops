@@ -86,9 +86,15 @@ spec:
               value: /data
             - name: RUST_LOG
               value: {{ .Values.aiMemory.logLevel | quote }}
-            # Host allowlist — MUST include the ingress host (Traefik preserves the Host).
+            # Host allowlist — MUST include the ingress host (the proxy preserves the
+            # original Host). The ingress host is auto-appended so a Rancher/Questions
+            # install never has to edit the allowedHosts list by hand.
+            {{- $hosts := .Values.aiMemory.allowedHosts }}
+            {{- if and .Values.ingress.enabled .Values.ingress.host (not (has .Values.ingress.host $hosts)) }}
+            {{- $hosts = append $hosts .Values.ingress.host }}
+            {{- end }}
             - name: AI_MEMORY_ALLOWED_HOSTS
-              value: {{ join "," .Values.aiMemory.allowedHosts | quote }}
+              value: {{ join "," $hosts | quote }}
             {{- with .Values.aiMemory.llm.provider }}
             - name: AI_MEMORY_LLM_PROVIDER
               value: {{ . | quote }}
