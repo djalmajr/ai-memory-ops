@@ -32,6 +32,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -208,26 +209,64 @@ func setChallenge(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+mu+`"`)
 }
 
-// forwardedBaseURL reconstructs scheme://host from the Traefik headers.
+// forwardedRoute extracts the original request method and URI from the reverse
+// proxy headers, supporting both ingress flavors:
+//   - Traefik forwardAuth: X-Forwarded-Method + X-Forwarded-Uri (path+query)
+//   - nginx-ingress auth_request: X-Original-Method + X-Original-URL (absolute URL)
+//
+// The nginx absolute URL is reduced to path+query so downstream path matching
+// (isPublicPath / roleForRoute) behaves identically across proxies.
+func forwardedRoute(r *http.Request) (method, uri string) {
+	method = r.Header.Get("X-Forwarded-Method")
+	if method == "" {
+		method = r.Header.Get("X-Original-Method")
+	}
+	uri = r.Header.Get("X-Forwarded-Uri")
+	if uri == "" {
+		if orig := r.Header.Get("X-Original-URL"); orig != "" {
+			if u, err := url.Parse(orig); err == nil && u.Path != "" {
+				uri = u.RequestURI()
+			} else {
+				uri = orig
+			}
+		}
+	}
+	return method, uri
+}
+
+// forwardedBaseURL reconstructs scheme://host from the proxy headers. Prefers the
+// Traefik X-Forwarded-* pair; falls back to the absolute nginx X-Original-URL.
 func forwardedBaseURL(r *http.Request) string {
 	host := r.Header.Get("X-Forwarded-Host")
+	scheme := r.Header.Get("X-Forwarded-Proto")
+	if host == "" || scheme == "" {
+		if orig := r.Header.Get("X-Original-URL"); orig != "" {
+			if u, err := url.Parse(orig); err == nil && u.Host != "" {
+				if host == "" {
+					host = u.Host
+				}
+				if scheme == "" {
+					scheme = u.Scheme
+				}
+			}
+		}
+	}
 	if host == "" {
 		host = r.Host
 	}
-	scheme := r.Header.Get("X-Forwarded-Proto")
 	if scheme == "" {
 		scheme = "https"
 	}
 	return scheme + "://" + host
 }
 
-// handleVerify is called by the Traefik forwardAuth.
-// Traefik headers: X-Forwarded-Method, X-Forwarded-Uri, X-Forwarded-Host,
-// X-Forwarded-For, Authorization (passes the original).
+// handleVerify is called by the reverse proxy's external-auth integration.
+// Ingress-agnostic: supports both Traefik forwardAuth (X-Forwarded-Method/-Uri)
+// and nginx-ingress auth_request (X-Original-Method + absolute X-Original-URL).
+// The original Authorization header is passed through by both proxies.
 func handleVerify(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	method := r.Header.Get("X-Forwarded-Method")
-	uri := r.Header.Get("X-Forwarded-Uri")
+	method, uri := forwardedRoute(r)
 	ip := r.Header.Get("X-Forwarded-For")
 	authHeader := r.Header.Get("Authorization")
 

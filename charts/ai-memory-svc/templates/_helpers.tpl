@@ -65,6 +65,32 @@ See the storage-class notes in the chart values.
 {{- end }}
 
 {{/*
+Resolve the effective ingress backend (the actual ingress controller flavor).
+`ingress.className: auto` (the default) auto-detects Traefik by checking whether the
+`traefik.io/v1alpha1` CRD is installed in the cluster; otherwise it falls back to
+`nginx`. Any explicit value (e.g. `traefik`, `nginx`) is passed through verbatim.
+This is the single source of truth for the auth-edge branching — templates compare
+against THIS helper, never against `.Values.ingress.className` directly, so the same
+chart artifact works transparently on a Traefik lab and an nginx-only cluster.
+*/}}
+{{- define "ai-memory-svc.ingressBackend" -}}
+{{- $cn := .Values.ingress.className | default "auto" -}}
+{{- if eq $cn "auto" -}}
+{{- if .Capabilities.APIVersions.Has "traefik.io/v1alpha1" -}}traefik{{- else -}}nginx{{- end -}}
+{{- else -}}
+{{- $cn -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+In-cluster URL of the mcp-auth /verify endpoint (used by the nginx external-auth
+annotation and conceptually mirrored by the Traefik forwardAuth Middleware).
+*/}}
+{{- define "ai-memory-svc.mcpAuthVerifyUrl" -}}
+{{- printf "http://%s.%s.svc.cluster.local:%v/verify" (include "ai-memory-svc.fullname" .) .Release.Namespace (.Values.service.authPort | default 8081) -}}
+{{- end -}}
+
+{{/*
 Service name for the optional `contributors` admission webhook deployment.
 */}}
 {{- define "ai-memory-svc.contributorsFullname" -}}

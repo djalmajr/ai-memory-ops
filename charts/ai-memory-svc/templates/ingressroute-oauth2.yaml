@@ -1,4 +1,4 @@
-{{- if and .Values.oauth2Proxy.enabled .Values.ingress.enabled .Values.ingress.host (eq (.Values.ingress.className | default "nginx") "traefik") }}
+{{- if and .Values.oauth2Proxy.enabled .Values.ingress.enabled .Values.ingress.host (eq (include "ai-memory-svc.ingressBackend" .) "traefik") }}
 {{- /*
   Routes the browser routes (/oauth2 callback + /web + /api/v1) to the oauth2-proxy,
   with priority > the base Ingress "/" (which falls into ai-memory behind the mcp-auth).

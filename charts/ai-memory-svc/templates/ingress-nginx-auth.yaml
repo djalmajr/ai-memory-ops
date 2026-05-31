@@ -1,0 +1,134 @@
+{{- /*
+  nginx-ingress edge auth — the equivalent of the Traefik forwardAuth Middleware
+  (mcp-auth) and the oauth2-proxy IngressRoute, expressed as external-auth
+  annotations. Rendered ONLY when the resolved backend is nginx AND at least one
+  auth layer is enabled. The cluster has `allow-snippet-annotations: false`, so the
+  mcp-auth sidecar reads BOTH header flavors (X-Forwarded-* and X-Original-*) — no
+  auth-snippet needed (see images/mcp-auth/main.go: forwardedRoute).
+
+  nginx applies auth annotations PER Ingress object, so each protected route group
+  gets its own Ingress (more-specific paths win over the base "/" Ingress, which
+  stays unauthenticated for the SPA and the public OAuth metadata).
+*/}}
+{{- if and .Values.ingress.enabled .Values.ingress.host (eq (include "ai-memory-svc.ingressBackend" .) "nginx") }}
+{{- $fullname := include "ai-memory-svc.fullname" . }}
+{{- $path := .Values.ingress.path | default "/" }}
+{{- $isPathBased := ne $path "/" }}
+{{- $scheme := ternary "https" "http" .Values.ingress.tls.enabled }}
+{{- $tlsSecret := .Values.ingress.tls.secretName | default (printf "%s-tls" $fullname) }}
+{{- $oauth2Svc := printf "%s-oauth2" $fullname }}
+{{- /* Build the protected-route list from the enabled auth layers. */}}
+{{- $routes := list }}
+{{- if .Values.mcpAuth.enabled }}
+  {{- $routes = append $routes (dict "name" "mcp" "route" "/mcp" "auth" "mcp") }}
+  {{- $routes = append $routes (dict "name" "hook" "route" "/hook" "auth" "mcp") }}
+{{- end }}
+{{- if .Values.oauth2Proxy.enabled }}
+  {{- $routes = append $routes (dict "name" "web" "route" "/web" "auth" "oauth2") }}
+  {{- $routes = append $routes (dict "name" "api" "route" "/api/v1" "auth" "oauth2") }}
+{{- end }}
+{{- range $r := $routes }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}-{{ $r.name }}
+  labels:
+    {{- include "ai-memory-svc.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: ingress-{{ $r.name }}
+  annotations:
+    {{- if $isPathBased }}
+    # Strip the base prefix (e.g. /wiki) so the engine sees its root route ({{ $r.route }}).
+    nginx.ingress.kubernetes.io/rewrite-target: {{ $r.route }}/$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    {{- end }}
+    {{- with $.Values.ingress.maxBodySize }}
+    nginx.ingress.kubernetes.io/proxy-body-size: {{ . | quote }}
+    {{- end }}
+    {{- if eq $r.auth "mcp" }}
+    # Machine auth: validate the OIDC JWT via the mcp-auth sidecar /verify.
+    nginx.ingress.kubernetes.io/auth-url: {{ include "ai-memory-svc.mcpAuthVerifyUrl" $ | quote }}
+    # Headers the sidecar emits on 200 and that nginx forwards to the upstream
+    # (incl. the swapped static Authorization when UPSTREAM_AUTH_TOKEN is set).
+    nginx.ingress.kubernetes.io/auth-response-headers: "Authorization,X-Auth-Email,X-Auth-Username,X-Auth-Sub,X-Memory-Actor-User,X-Memory-Actor-Sub,X-Memory-Actor-Client,X-Memory-Actor-Agent,X-Memory-Actor-Session-Id"
+    {{- else if eq $r.auth "oauth2" }}
+    # Browser auth: oauth2-proxy interactive OIDC login (redirect to Keycloak).
+    nginx.ingress.kubernetes.io/auth-url: "http://{{ $oauth2Svc }}.{{ $.Release.Namespace }}.svc.cluster.local:4180/oauth2/auth"
+    nginx.ingress.kubernetes.io/auth-signin: "{{ $scheme }}://{{ $.Values.ingress.host }}{{ $path | trimSuffix "/" }}/oauth2/start?rd=$escaped_request_uri"
+    nginx.ingress.kubernetes.io/auth-response-headers: "Authorization,X-Auth-Request-Email,X-Auth-Request-User"
+    {{- end }}
+    {{- with $.Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: nginx
+  {{- if $.Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ $.Values.ingress.host | quote }}
+      secretName: {{ $tlsSecret }}
+  {{- end }}
+  rules:
+    - host: {{ $.Values.ingress.host | quote }}
+      http:
+        paths:
+          {{- if $isPathBased }}
+          - path: "{{ $path }}{{ $r.route }}(/|$)(.*)"
+            pathType: ImplementationSpecific
+          {{- else }}
+          - path: {{ $r.route }}
+            pathType: Prefix
+          {{- end }}
+            backend:
+              service:
+                name: {{ $fullname }}
+                port:
+                  number: {{ $.Values.service.port }}
+{{- end }}
+{{- /*
+  oauth2-proxy callback/sign-in endpoints — routed straight to the proxy, NO auth
+  (these ARE the auth). Required for the auth-signin redirect above to resolve.
+*/}}
+{{- if .Values.oauth2Proxy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}-oauth2
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingress-oauth2
+  annotations:
+    {{- if $isPathBased }}
+    nginx.ingress.kubernetes.io/rewrite-target: /oauth2/$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: nginx
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ $tlsSecret }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          {{- if $isPathBased }}
+          - path: "{{ $path }}/oauth2(/|$)(.*)"
+            pathType: ImplementationSpecific
+          {{- else }}
+          - path: /oauth2
+            pathType: Prefix
+          {{- end }}
+            backend:
+              service:
+                name: {{ $oauth2Svc }}
+                port:
+                  number: 4180
+{{- end }}
+{{- end }}

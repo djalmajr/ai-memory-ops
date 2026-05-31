@@ -1,4 +1,4 @@
-{{- if and .Values.mcpAuth.enabled .Values.ingress.enabled (eq .Values.ingress.className "traefik") }}
+{{- if and .Values.mcpAuth.enabled .Values.ingress.enabled (eq (include "ai-memory-svc.ingressBackend" .) "traefik") }}
 # Traefik forwardAuth middleware — delegates validation to the mcp-auth sidecar.
 # Keycloak OIDC acts as the MCP IdP. See images/mcp-auth/README.md.
 apiVersion: traefik.io/v1alpha1
