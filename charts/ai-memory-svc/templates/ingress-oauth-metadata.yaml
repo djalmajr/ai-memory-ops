@@ -1,4 +1,4 @@
-{{- if and .Values.mcpAuth.enabled .Values.mcpAuth.oauth.enabled .Values.ingress.enabled .Values.ingress.host (eq .Values.ingress.className "traefik") }}
+{{- if and .Values.mcpAuth.enabled .Values.mcpAuth.oauth.enabled .Values.ingress.enabled .Values.ingress.host (eq (include "ai-memory-svc.ingressBackend" .) "traefik") }}
 {{- $path := printf "%s/.well-known/oauth-protected-resource" (.Values.ingress.path | default "" | trimSuffix "/") }}
 # OAuth Protected Resource Metadata (RFC 9728). Dedicated route that serves
 # the PUBLIC metadata straight from the mcp-auth sidecar — WITHOUT forwardAuth (discovery
@@ -23,7 +23,7 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
-  ingressClassName: {{ .Values.ingress.className }}
+  ingressClassName: {{ include "ai-memory-svc.ingressBackend" . }}
   {{- if .Values.ingress.tls.enabled }}
   tls:
     - hosts:
