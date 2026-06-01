@@ -15,15 +15,17 @@
 #     -t registry.example.com/<grupo>/ai-memory:<ver>
 
 ARG AI_MEMORY_REPO=https://github.com/djalmajr/ai-memory.git
-# Default to the `deploy` integration branch: main + every topic branch
-# merged (admission webhook chain + actor context, cross-project search
-# strategy, global memory_query search, …). Each topic branch stays
-# independent off `main` for clean upstream PRs; `deploy` is the operator's
-# consolidated deploy line and is never submitted upstream. See the engine
-# repo's notes/git-branch-strategy.md. Override at build time for a cut:
-#   --build-arg AI_MEMORY_REF=feature/admission-webhooks  # admission only
-#   --build-arg AI_MEMORY_REF=main                         # plain fork main
-ARG AI_MEMORY_REF=deploy
+# Default to the `deploy-v2` integration branch: upstream/main (which already
+# absorbed admission webhooks, read-page resolver, FTS path-index, write-target
+# active-workspace) + only the still-unmerged operator deltas (move-project +
+# its admission wiring, and the strip-runbook-title-prefix wiki migration).
+# Each topic branch stays independent off `main` for clean upstream PRs;
+# `deploy-v2` is the operator's consolidated deploy line and is never submitted
+# upstream. The old `deploy` branch is kept as legacy/rollback. Override at
+# build time for a cut:
+#   --build-arg AI_MEMORY_REF=feat/move-project  # move-project only
+#   --build-arg AI_MEMORY_REF=main               # plain fork main
+ARG AI_MEMORY_REF=deploy-v2
 ARG AI_MEMORY_UI_REPO=https://github.com/djalmajr/ai-memory-ui.git
 ARG AI_MEMORY_UI_REF=main
 
