@@ -46,7 +46,7 @@ spec:
         # Replaces the old `mcp` and `mcp-write` containers.
         # --------------------------------------------------------------
         - name: ai-memory
-          image: "{{ .Values.aiMemory.image.repository }}:{{ .Values.aiMemory.image.tag }}"
+          image: "{{ .Values.aiMemory.image.repository }}{{ if .Values.aiMemory.image.digest }}@{{ .Values.aiMemory.image.digest }}{{ else }}:{{ .Values.aiMemory.image.tag }}{{ end }}"
           imagePullPolicy: {{ .Values.aiMemory.image.pullPolicy }}
           args:
             - serve
@@ -95,6 +95,23 @@ spec:
             {{- end }}
             - name: AI_MEMORY_ALLOWED_HOSTS
               value: {{ join "," $hosts | quote }}
+            {{- /* Base-path hosting: when the ingress is path-based AND not stripping,
+               the engine owns the prefix (nests its whole surface under it) and the
+               web UI mounts at <base><webSlug>. Emitted ONLY in this mode, so root /
+               strip-mode deploys keep an unchanged manifest. */}}
+            {{- if and .Values.ingress.enabled (ne (.Values.ingress.path | default "/") "/") (not .Values.ingress.stripPathPrefix) }}
+            - name: AI_MEMORY_BASE_PATH
+              value: {{ .Values.ingress.path | quote }}
+            - name: AI_MEMORY_WEB_SLUG
+              value: {{ .Values.aiMemory.webSlug | default "/web" | quote }}
+            {{- end }}
+            {{- /* Fork/operator deploys whose data-dir was migrated by a different
+               migration ordering (see deploy-v2 cutover notes) boot in tolerant mode
+               instead of aborting on refinery checksum/order divergence. */}}
+            {{- if .Values.aiMemory.tolerateMigrationDivergence }}
+            - name: AI_MEMORY_TOLERATE_MIGRATION_DIVERGENCE
+              value: "true"
+            {{- end }}
             {{- with .Values.aiMemory.llm.provider }}
             - name: AI_MEMORY_LLM_PROVIDER
               value: {{ . | quote }}
@@ -161,9 +178,21 @@ spec:
             failureThreshold: 30
             periodSeconds: 5
           livenessProbe:
+            {{- if or .Values.aiMemory.tolerateMigrationDivergence (and .Values.ingress.enabled (ne (.Values.ingress.path | default "/") "/") (not .Values.ingress.stripPathPrefix)) }}
+            # tcpSocket liveness when EITHER:
+            #  - migration-tolerant (fork) mode: `ai-memory status` opens the store
+            #    strictly and aborts on the very divergence `serve` was told to tolerate; OR
+            #  - base-path mode (AI_MEMORY_BASE_PATH set): `ai-memory status` is an HTTP
+            #    client against 127.0.0.1:49374/status and is NOT base-path aware, so it
+            #    404s under the prefix and would kill a healthy server.
+            # Either way, fall back to a port-based liveness.
+            tcpSocket:
+              port: http
+            {{- else }}
             # `ai-memory status` is an HTTP client against 127.0.0.1:49374 (Host allowed).
             exec:
               command: ["/usr/local/bin/ai-memory", "status"]
+            {{- end }}
             periodSeconds: 30
             timeoutSeconds: 10
           readinessProbe:

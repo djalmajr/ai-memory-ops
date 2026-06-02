@@ -11,7 +11,10 @@ metadata:
   labels:
     {{- include "ai-memory-svc.labels" . | nindent 4 }}
   annotations:
-    {{- if and $isNginx $isPathBased }}
+    {{- /* Strip the prefix only when the operator opts in (stripPathPrefix).
+       With stripPathPrefix=false the engine itself serves under AI_MEMORY_BASE_PATH
+       (pass-through), so nginx must NOT rewrite. */}}
+    {{- if and $isNginx $isPathBased .Values.ingress.stripPathPrefix }}
     nginx.ingress.kubernetes.io/rewrite-target: /$2
     nginx.ingress.kubernetes.io/use-regex: "true"
     {{- end }}
@@ -53,13 +56,13 @@ spec:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
-          {{- if and $isNginx $isPathBased }}
-          # nginx-ingress: rewrite-target via regex (full path captured in $2)
+          {{- if and $isNginx $isPathBased .Values.ingress.stripPathPrefix }}
+          # nginx-ingress strip mode: rewrite-target via regex (full path captured in $2)
           - path: "{{ $path }}(/|$)(.*)"
             pathType: ImplementationSpecific
           {{- else if $isPathBased }}
-          # Traefik (and others): simple prefix — the backend receives the request with the full path.
-          # For strip-prefix in Traefik, use a Middleware via annotation on the Ingress separately.
+          # Pass-through prefix — the backend receives the full path. nginx (no strip,
+          # engine handles AI_MEMORY_BASE_PATH) and Traefik both land here.
           - path: {{ $path }}
             pathType: Prefix
           {{- else }}

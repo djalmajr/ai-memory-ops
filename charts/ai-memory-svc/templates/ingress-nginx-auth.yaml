@@ -37,8 +37,10 @@ metadata:
     {{- include "ai-memory-svc.labels" $ | nindent 4 }}
     app.kubernetes.io/component: ingress-{{ $r.name }}
   annotations:
-    {{- if $isPathBased }}
-    # Strip the base prefix (e.g. /wiki) so the engine sees its root route ({{ $r.route }}).
+    {{- /* Engine-backed routes: strip only when stripPathPrefix=true (engine at
+       root). With stripPathPrefix=false the engine serves under AI_MEMORY_BASE_PATH,
+       so pass the full path through unchanged. */}}
+    {{- if and $isPathBased $.Values.ingress.stripPathPrefix }}
     nginx.ingress.kubernetes.io/rewrite-target: {{ $r.route }}/$2
     nginx.ingress.kubernetes.io/use-regex: "true"
     {{- end }}
@@ -72,9 +74,13 @@ spec:
     - host: {{ $.Values.ingress.host | quote }}
       http:
         paths:
-          {{- if $isPathBased }}
+          {{- if and $isPathBased $.Values.ingress.stripPathPrefix }}
           - path: "{{ $path }}{{ $r.route }}(/|$)(.*)"
             pathType: ImplementationSpecific
+          {{- else if $isPathBased }}
+          # Pass-through: engine serves {{ $path }}{{ $r.route }} under AI_MEMORY_BASE_PATH.
+          - path: "{{ $path }}{{ $r.route }}"
+            pathType: Prefix
           {{- else }}
           - path: {{ $r.route }}
             pathType: Prefix

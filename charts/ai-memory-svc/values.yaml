@@ -60,6 +60,7 @@ monitoring:
 # ----------------------------------------------------------------------------
 aiMemory:
   image:
+    digest: ""            # pin by digest (overrides tag when set)
     repository: ghcr.io/djalmajr/ai-memory-ops/ai-memory
     tag: "latest"
     pullPolicy: IfNotPresent
@@ -75,6 +76,15 @@ aiMemory:
   project: ""
   enableWeb: true          # mounts /web (browser) + /api/v1 (read-only)
   webUiDir: ""             # if set, serves a custom static UI at /web (--web-ui-dir)
+  # Slug the web UI mounts at WITHIN the base path (AI_MEMORY_WEB_SLUG). Only takes
+  # effect in base-path mode (ingress path-based + stripPathPrefix=false). "/web"
+  # keeps it at <base>/web; "/" serves it at the base root (<base>). API stays at
+  # <base>/api/v1 regardless.
+  webSlug: "/web"
+  # Boot in migration-tolerant (fork) mode: skip the refinery checksum/order
+  # divergence abort when the data-dir was migrated by a different build's
+  # migration ordering. Operator escape hatch — leave false for normal installs.
+  tolerateMigrationDivergence: false
   httpStateful: false      # stateless by default (curl/simple clients without mcp-remote)
   logLevel: "ai_memory=info,ai_memory_web=info,ai_memory_mcp=info"
   # Host-header allowlist (AI_MEMORY_ALLOWED_HOSTS). MUST include the ingress host
