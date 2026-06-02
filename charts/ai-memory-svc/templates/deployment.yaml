@@ -178,9 +178,17 @@ spec:
             failureThreshold: 30
             periodSeconds: 5
           livenessProbe:
+            {{- if .Values.aiMemory.tolerateMigrationDivergence }}
+            # In migration-tolerant (fork) mode `ai-memory status` opens the store
+            # strictly and aborts on the very divergence `serve` was told to tolerate,
+            # which would kill a healthy server. Fall back to a tcpSocket liveness.
+            tcpSocket:
+              port: http
+            {{- else }}
             # `ai-memory status` is an HTTP client against 127.0.0.1:49374 (Host allowed).
             exec:
               command: ["/usr/local/bin/ai-memory", "status"]
+            {{- end }}
             periodSeconds: 30
             timeoutSeconds: 10
           readinessProbe:
