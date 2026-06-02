@@ -178,10 +178,14 @@ spec:
             failureThreshold: 30
             periodSeconds: 5
           livenessProbe:
-            {{- if .Values.aiMemory.tolerateMigrationDivergence }}
-            # In migration-tolerant (fork) mode `ai-memory status` opens the store
-            # strictly and aborts on the very divergence `serve` was told to tolerate,
-            # which would kill a healthy server. Fall back to a tcpSocket liveness.
+            {{- if or .Values.aiMemory.tolerateMigrationDivergence (and .Values.ingress.enabled (ne (.Values.ingress.path | default "/") "/") (not .Values.ingress.stripPathPrefix)) }}
+            # tcpSocket liveness when EITHER:
+            #  - migration-tolerant (fork) mode: `ai-memory status` opens the store
+            #    strictly and aborts on the very divergence `serve` was told to tolerate; OR
+            #  - base-path mode (AI_MEMORY_BASE_PATH set): `ai-memory status` is an HTTP
+            #    client against 127.0.0.1:49374/status and is NOT base-path aware, so it
+            #    404s under the prefix and would kill a healthy server.
+            # Either way, fall back to a port-based liveness.
             tcpSocket:
               port: http
             {{- else }}
