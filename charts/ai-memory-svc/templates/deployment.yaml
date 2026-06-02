@@ -95,6 +95,23 @@ spec:
             {{- end }}
             - name: AI_MEMORY_ALLOWED_HOSTS
               value: {{ join "," $hosts | quote }}
+            {{- /* Base-path hosting: when the ingress is path-based AND not stripping,
+               the engine owns the prefix (nests its whole surface under it) and the
+               web UI mounts at <base><webSlug>. Emitted ONLY in this mode, so root /
+               strip-mode deploys keep an unchanged manifest. */}}
+            {{- if and .Values.ingress.enabled (ne (.Values.ingress.path | default "/") "/") (not .Values.ingress.stripPathPrefix) }}
+            - name: AI_MEMORY_BASE_PATH
+              value: {{ .Values.ingress.path | quote }}
+            - name: AI_MEMORY_WEB_SLUG
+              value: {{ .Values.aiMemory.webSlug | default "/web" | quote }}
+            {{- end }}
+            {{- /* Fork/operator deploys whose data-dir was migrated by a different
+               migration ordering (see deploy-v2 cutover notes) boot in tolerant mode
+               instead of aborting on refinery checksum/order divergence. */}}
+            {{- if .Values.aiMemory.tolerateMigrationDivergence }}
+            - name: AI_MEMORY_TOLERATE_MIGRATION_DIVERGENCE
+              value: "true"
+            {{- end }}
             {{- with .Values.aiMemory.llm.provider }}
             - name: AI_MEMORY_LLM_PROVIDER
               value: {{ . | quote }}
