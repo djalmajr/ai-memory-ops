@@ -46,7 +46,7 @@ spec:
         # Replaces the old `mcp` and `mcp-write` containers.
         # --------------------------------------------------------------
         - name: ai-memory
-          image: "{{ .Values.aiMemory.image.repository }}:{{ .Values.aiMemory.image.tag }}"
+          image: "{{ .Values.aiMemory.image.repository }}{{ if .Values.aiMemory.image.digest }}@{{ .Values.aiMemory.image.digest }}{{ else }}:{{ .Values.aiMemory.image.tag }}{{ end }}"
           imagePullPolicy: {{ .Values.aiMemory.image.pullPolicy }}
           args:
             - serve

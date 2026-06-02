@@ -60,6 +60,7 @@ monitoring:
 # ----------------------------------------------------------------------------
 aiMemory:
   image:
+    digest: ""            # pin by digest (overrides tag when set)
     repository: ghcr.io/djalmajr/ai-memory-ops/ai-memory
     tag: "latest"
     pullPolicy: IfNotPresent
