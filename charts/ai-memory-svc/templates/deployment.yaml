@@ -160,6 +160,27 @@ spec:
             - name: AI_MEMORY_ADMISSION_WEBHOOKS_JSON
               value: {{ $webhooks | toJson | quote }}
             {{- end }}
+            {{- /*
+              Auto-scope env vars. Only render the keys the operator explicitly set,
+              so leaving everything blank in values.yaml produces zero render diff
+              vs the pre-autoscope chart. Figment in the engine merges
+              `AI_MEMORY_AUTO_SCOPE__<FIELD>` into the `[auto_scope]` config
+              block; absent vars fall through to engine defaults.
+            */}}
+            {{- with .Values.aiMemory.autoScope }}
+            {{- if .mode }}
+            - name: AI_MEMORY_AUTO_SCOPE__MODE
+              value: {{ .mode | quote }}
+            {{- end }}
+            {{- if .sessionTtlSecs }}
+            - name: AI_MEMORY_AUTO_SCOPE__SESSION_TTL_SECS
+              value: {{ .sessionTtlSecs | quote }}
+            {{- end }}
+            {{- if .maxEntries }}
+            - name: AI_MEMORY_AUTO_SCOPE__MAX_ENTRIES
+              value: {{ .maxEntries | quote }}
+            {{- end }}
+            {{- end }}
           # Secret brings AI_MEMORY_AUTH_TOKEN (2nd layer, optional), LLM_API_KEY,
           # OPENAI_API_KEY (embeddings). optional=true → absence does not break the boot.
           envFrom:

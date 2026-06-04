@@ -111,6 +111,23 @@ aiMemory:
     limits:
       cpu: 1500m
       memory: 2Gi
+  # Auto-scope (active project isolation) — how the hook-published
+  # "currently active project" pointer is shared across concurrent MCP
+  # callers. `single` (default) is the legacy process-wide slot, safe
+  # for one-operator installs. `per_session` keys by session_id —
+  # isolates concurrent agent runs (Claude Code + Codex + … on the
+  # same operator). `per_actor` keys by (user, session_id) — isolates
+  # across DB users too, for multi-user installs where several authed
+  # operators share one engine.
+  #
+  # Only the env vars whose values differ from the engine defaults are
+  # emitted, so leaving everything at "" keeps the rendered Deployment
+  # unchanged from before this knob existed (zero diff in helm upgrade
+  # when flipping to mode: single).
+  autoScope:
+    mode: ""                  # "" | single | per_session | per_actor
+    sessionTtlSecs: ""        # default 3600 (1h)
+    maxEntries: ""            # default 4096
   # Admission webhook chain — synchronous HTTP hooks invoked inside
   # `Wiki::write_page` just before page persistence. Each entry is a
   # {name,url,timeout_ms,failure_policy,events} object. The chart auto-
