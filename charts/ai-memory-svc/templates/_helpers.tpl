@@ -91,6 +91,25 @@ annotation and conceptually mirrored by the Traefik forwardAuth Middleware).
 {{- end -}}
 
 {{/*
+nginx-ingress proxy buffer annotations for routes whose responses can carry
+the oauth2-proxy session cookie. Keycloak tokens (access + id + refresh)
+push the encrypted session past 4 KB, so oauth2-proxy splits it into
+multiple `_oauth2_proxy_N` cookies; the `/oauth2/callback` and auth-
+request responses then ship 4+ large `Set-Cookie` headers that overflow
+nginx's default 4 KB `proxy_buffer_size` → 502 Bad Gateway. Bumping to
+16k × 4 buffers absorbs ~64 KB of response headers, which is well above
+what Keycloak realistically emits. Renders nothing when oauth2-proxy is
+off or the operator explicitly disables the annotation, so existing
+clusters without the issue stay unchanged.
+*/}}
+{{- define "ai-memory-svc.nginxOauth2BufferAnnotations" -}}
+{{- if and .Values.oauth2Proxy.enabled .Values.oauth2Proxy.nginxBuffers.enabled }}
+nginx.ingress.kubernetes.io/proxy-buffer-size: {{ .Values.oauth2Proxy.nginxBuffers.size | quote }}
+nginx.ingress.kubernetes.io/proxy-buffers-number: {{ .Values.oauth2Proxy.nginxBuffers.number | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
 Service name for the optional `contributors` admission webhook deployment.
 */}}
 {{- define "ai-memory-svc.contributorsFullname" -}}
