@@ -305,6 +305,20 @@ oauth2Proxy:
   configSecretName: oauth2-proxy-config   # external: oauth2-proxy.yaml + cookie-secret
   caSecretName: oauth2-proxy-ca           # external: ca.crt
   redirectUrl: ""                         # e.g. https://memory.example.com/oauth2/callback
+  # Keycloak's access+id+refresh tokens push the encrypted oauth2-proxy
+  # session past 4 KB, so the proxy splits it into multiple
+  # `_oauth2_proxy_N` cookies. The /oauth2/callback response then ships 4+
+  # large `Set-Cookie` headers that overflow nginx-ingress's default 4 KB
+  # `proxy_buffer_size` → 502 Bad Gateway at the very last step of the
+  # login. 16k × 4 buffers comfortably absorbs ~64 KB of response headers
+  # (well above what Keycloak emits in practice). Only takes effect when
+  # the ingress backend is nginx AND oauth2Proxy is on; disable here if
+  # the operator already sets the buffers globally on the ingress
+  # controller and prefers to keep per-Ingress annotations minimal.
+  nginxBuffers:
+    enabled: true
+    size: "16k"
+    number: 4
   emailDomains: "*"
   cookieDomains: ""                       # e.g. memory.example.com
   whitelistDomains: ""                    # e.g. memory.example.com

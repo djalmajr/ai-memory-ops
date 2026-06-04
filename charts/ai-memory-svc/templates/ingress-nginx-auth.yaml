@@ -58,6 +58,7 @@ metadata:
     nginx.ingress.kubernetes.io/auth-url: "http://{{ $oauth2Svc }}.{{ $.Release.Namespace }}.svc.cluster.local:4180/oauth2/auth"
     nginx.ingress.kubernetes.io/auth-signin: "{{ $scheme }}://{{ $.Values.ingress.host }}{{ $path | trimSuffix "/" }}/oauth2/start?rd=$escaped_request_uri"
     nginx.ingress.kubernetes.io/auth-response-headers: "Authorization,X-Auth-Request-Email,X-Auth-Request-User"
+    {{- include "ai-memory-svc.nginxOauth2BufferAnnotations" $ | nindent 4 }}
     {{- end }}
     {{- with $.Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
@@ -109,6 +110,12 @@ metadata:
     nginx.ingress.kubernetes.io/rewrite-target: /oauth2/$2
     nginx.ingress.kubernetes.io/use-regex: "true"
     {{- end }}
+    {{- /* /oauth2/callback is where the multi-cookie Set-Cookie response is
+       emitted by oauth2-proxy; nginx needs larger proxy buffers to forward
+       it without truncating into a 502. Same helper is reused on the
+       /web and /api/v1 routes above because auth-request handshakes
+       forward the same cookie back. */}}
+    {{- include "ai-memory-svc.nginxOauth2BufferAnnotations" . | nindent 4 }}
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
