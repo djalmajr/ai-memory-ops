@@ -95,6 +95,14 @@ spec:
             {{- end }}
             - name: AI_MEMORY_ALLOWED_HOSTS
               value: {{ join "," $hosts | quote }}
+            {{- if .Values.aiMemory.rootUsername }}
+            # Stamps `ActorContext.user` on every rung-1 (bearer) request so
+            # admission webhooks like scope-guard can ACL by a named identity.
+            # Emitted only when set; absence keeps the engine in its legacy
+            # "anonymous root" mode (zero render-diff for unrelated installs).
+            - name: AI_MEMORY_AUTH__ROOT_USERNAME
+              value: {{ .Values.aiMemory.rootUsername | quote }}
+            {{- end }}
             {{- /* Base-path hosting: when the ingress is path-based AND not stripping,
                the engine owns the prefix (nests its whole surface under it) and the
                web UI mounts at <base><webSlug>. Emitted ONLY in this mode, so root /

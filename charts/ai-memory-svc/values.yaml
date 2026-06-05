@@ -86,6 +86,12 @@ aiMemory:
   # migration ordering. Operator escape hatch — leave false for normal installs.
   tolerateMigrationDivergence: false
   httpStateful: false      # stateless by default (curl/simple clients without mcp-remote)
+  # Stable username stamped onto every rung-1 (bearer-token) request. When set,
+  # `ActorContext.user` becomes this value for any authenticated write; admission
+  # webhooks (e.g. scope-guard) see it as the user key. Leave empty in single-
+  # operator installs that don't need a named identity; set it before enabling
+  # `webhooks.scopeGuard` so the ACL has a non-empty user to match.
+  rootUsername: ""
   logLevel: "ai_memory=info,ai_memory_web=info,ai_memory_mcp=info"
   # Host-header allowlist (AI_MEMORY_ALLOWED_HOSTS). MUST include the ingress host
   # (Traefik preserves the original Host when forwarding to the backend).
