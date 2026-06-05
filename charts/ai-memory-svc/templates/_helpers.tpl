@@ -157,3 +157,32 @@ events:
   - delete
   - purge_project
 {{- end }}
+
+{{/*
+Service name for the optional `scope-guard` admission webhook deployment.
+*/}}
+{{- define "ai-memory-svc.scopeGuardFullname" -}}
+{{- printf "%s-scope-guard" (include "ai-memory-svc.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Default admission webhook entry for the in-cluster `scope-guard` Service.
+Forces `failure_policy: reject` so a misconfigured rule (or a network
+hiccup talking to the webhook) ABORTS the write — the whole point of
+scope-guard is loud failure, not a silent skip. Subscribes to every
+mutation event the engine fires so cross-scope writes can't sneak in
+via consolidate / delete / move-project either.
+*/}}
+{{- define "ai-memory-svc.scopeGuardEntry" -}}
+name: scope-guard
+url: http://{{ include "ai-memory-svc.scopeGuardFullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.webhooks.scopeGuard.port | default 8080 }}/admit
+timeout_ms: {{ .Values.webhooks.scopeGuard.timeoutMs | default 2000 }}
+failure_policy: reject
+blocking: true
+events:
+  - write_page
+  - consolidate
+  - delete
+  - purge_project
+  - move_project
+{{- end }}

@@ -1,0 +1,19 @@
+{{- if .Values.webhooks.scopeGuard.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ai-memory-svc.scopeGuardFullname" . }}
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: scope-guard
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.webhooks.scopeGuard.port | default 8080 }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "ai-memory-svc.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: scope-guard
+{{- end }}

@@ -1,0 +1,86 @@
+{{- if .Values.webhooks.scopeGuard.enabled }}
+# Optional: `scope-guard` admission webhook — enforces per-user write
+# boundaries (ACL of user → [(workspace pattern, project pattern)]).
+# Plugs into ai-memory via the admission webhook chain
+# (see _helpers.tpl -> `scopeGuardEntry`, which auto-injects the URL
+# into AI_MEMORY_ADMISSION_WEBHOOKS_JSON on the main pod).
+#
+# Rules are sourced from `webhooks.scopeGuard.rules` (a map of
+# `user -> [{workspace, project}]`) and serialized to the pod via the
+# ACL_RULES env var. The webhook's failure_policy is forced to `reject`
+# when this chart toggle is on — a misconfigured pattern blocks writes
+# loudly instead of being silently logged.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ai-memory-svc.scopeGuardFullname" . }}
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: scope-guard
+spec:
+  replicas: {{ .Values.webhooks.scopeGuard.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "ai-memory-svc.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: scope-guard
+  template:
+    metadata:
+      labels:
+        {{- include "ai-memory-svc.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: scope-guard
+      annotations:
+        # Roll the pod on rule changes so a `helm upgrade --set` re-reads
+        # ACL_RULES without a manual rollout restart. The hash includes
+        # the whole rules block so additions/removals of any user roll.
+        checksum/rules: {{ .Values.webhooks.scopeGuard.rules | default dict | toJson | sha256sum }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: scope-guard
+          image: "{{ .Values.webhooks.scopeGuard.image.repository }}:{{ .Values.webhooks.scopeGuard.image.tag }}"
+          imagePullPolicy: {{ .Values.webhooks.scopeGuard.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.webhooks.scopeGuard.port | default 8080 }}
+              protocol: TCP
+          env:
+            - name: LISTEN_ADDR
+              value: "0.0.0.0:{{ .Values.webhooks.scopeGuard.port | default 8080 }}"
+            - name: LOG_LEVEL
+              value: {{ .Values.webhooks.scopeGuard.logLevel | default "info" | quote }}
+            # ACL_RULES is JSON: { "user": [{"workspace": "...", "project": "..."}, ...] }.
+            # We round-trip values.yaml through `toJson` so the operator
+            # can author rules in YAML naturally while the pod parses
+            # the JSON form Go's encoding/json expects. The default
+            # `{}` is intentionally restrictive: an empty rule set
+            # rejects every write so a half-finished helm upgrade fails
+            # loud, not silently allowing everything.
+            - name: ACL_RULES
+              value: {{ .Values.webhooks.scopeGuard.rules | default dict | toJson | quote }}
+          resources:
+            {{- toYaml (.Values.webhooks.scopeGuard.resources | default dict) | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            # 65532 = canonical distroless nonroot UID; matches the
+            # `USER 65532:65532` in images/scope-guard/Dockerfile.
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+{{- end }}

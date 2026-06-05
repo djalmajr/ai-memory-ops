@@ -152,6 +152,46 @@ aiMemory:
 # extensions open via plug-and-play HTTP services).
 # ----------------------------------------------------------------------------
 webhooks:
+  # `scope-guard` — write-side ACL admission webhook. Engine sends every
+  # write/delete/consolidate/move through this hook FIRST (failure_policy:
+  # reject is forced when enabled, see `_helpers.tpl scopeGuardEntry`).
+  # Each rule is `{workspace: <regex>, project: <regex>}`, auto-anchored
+  # with ^…$. The wildcard user `*` applies to every caller in addition
+  # to their own rules. Reads are NOT gated — engine has no read
+  # admission chain.
+  #
+  # Defaults: enabled=false, rules={} (empty ACL → deny-by-default; the
+  # pod starts but every write is rejected until an operator populates
+  # `rules` and reruns `helm upgrade`).
+  scopeGuard:
+    enabled: false
+    image:
+      repository: ghcr.io/djalmajr/ai-memory-ops/scope-guard
+      tag: latest
+      pullPolicy: IfNotPresent
+    port: 8080
+    logLevel: info          # debug | info | warn | error
+    timeoutMs: 2000
+    replicaCount: 1
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 200m
+        memory: 64Mi
+    # ACL — keys are usernames (from `ai-memory user add` or the
+    # configured root_username). Use `*` to grant a scope to every
+    # caller. Empty `rules: {}` (the default) rejects every write —
+    # set this before enabling in prod.
+    #
+    # Example:
+    # rules:
+    #   djalmajr:   [{ workspace: "djalmajr|shared", project: ".*" }]
+    #   cit-people: [{ workspace: "cit-people|shared", project: ".*" }]
+    #   "*":        [{ workspace: "public", project: ".*" }]
+    rules: {}
+
   # `contributors` — appends actor identity (agent/user/client) to
   # frontmatter.contributors as an append-only set keyed by (agent,client).
   # When enabled, the helper auto-registers the URL in the engine's

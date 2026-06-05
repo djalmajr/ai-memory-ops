@@ -156,6 +156,11 @@ spec:
             {{- if and .Values.webhooks.gitMirror .Values.webhooks.gitMirror.enabled }}
             {{- $webhooks = append $webhooks (include "ai-memory-svc.gitMirrorEntry" . | fromYaml) }}
             {{- end }}
+            {{- if and .Values.webhooks.scopeGuard .Values.webhooks.scopeGuard.enabled }}
+            {{- /* scope-guard prepends to the chain so its reject lands FIRST, before
+                   any contributor/mirror webhook has done observable work. */}}
+            {{- $webhooks = prepend $webhooks (include "ai-memory-svc.scopeGuardEntry" . | fromYaml) }}
+            {{- end }}
             {{- if $webhooks }}
             - name: AI_MEMORY_ADMISSION_WEBHOOKS_JSON
               value: {{ $webhooks | toJson | quote }}

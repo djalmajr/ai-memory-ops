@@ -60,6 +60,9 @@ jobs:
           - name: git-mirror
             context: images/git-mirror
             dockerfile: images/git-mirror/Dockerfile
+          - name: scope-guard
+            context: images/scope-guard
+            dockerfile: images/scope-guard/Dockerfile
     name: build ${{ matrix.image.name }}
     steps:
       # All action versions below run on Node.js 24 (the others are pinned
