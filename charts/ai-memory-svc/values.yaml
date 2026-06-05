@@ -172,6 +172,7 @@ webhooks:
   scopeGuard:
     enabled: false
     image:
+      digest: ""            # pin by digest (overrides tag when set)
       repository: ghcr.io/djalmajr/ai-memory-ops/scope-guard
       tag: latest
       pullPolicy: IfNotPresent

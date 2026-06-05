@@ -40,7 +40,7 @@ spec:
       {{- end }}
       containers:
         - name: scope-guard
-          image: "{{ .Values.webhooks.scopeGuard.image.repository }}:{{ .Values.webhooks.scopeGuard.image.tag }}"
+          image: "{{ .Values.webhooks.scopeGuard.image.repository }}{{ if .Values.webhooks.scopeGuard.image.digest }}@{{ .Values.webhooks.scopeGuard.image.digest }}{{ else }}:{{ .Values.webhooks.scopeGuard.image.tag }}{{ end }}"
           imagePullPolicy: {{ .Values.webhooks.scopeGuard.image.pullPolicy | default "IfNotPresent" }}
           ports:
             - name: http
