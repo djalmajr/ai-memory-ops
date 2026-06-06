@@ -1,0 +1,149 @@
+# ============================================================================
+# ai-memory-svc — VALUES DE REFERÊNCIA END-TO-END (ETL + GitLab + Keycloak)
+# ============================================================================
+# Topologia completa: engine + mcp-auth (Keycloak) + ETL (GitLab → wiki-content
+# via opencode) + embeddings (Ollama qwen3) + LLM (openai-compat).
+#
+# COMO USAR (Rancher UI): cole no wizard de install na aba **Edit YAML** — cobre
+# inclusive os campos que o formulário visual não expõe (ingress.annotations,
+# aiMemory.webUiDir, config.wiki.sources). Ou via CLI:
+#   helm upgrade --install ai-memory-svc charts/ai-memory-svc \
+#     -n knowledge-center -f examples/values-e2e-reference.yaml
+#
+# ANTES: criar o Secret out-of-band (NÃO é templado pelo chart):
+#   kubectl -n knowledge-center create secret generic ai-memory-svc-secrets \
+#     --from-literal=AI_MEMORY_AUTH_TOKEN="$(openssl rand -hex 24)" \
+#     --from-literal=GITLAB_API_TOKEN="<pat read_repository+write_repository>" \
+#     --from-literal=OPENCODE_API_KEY="<opencode plan key>" \
+#     --from-literal=OPENAI_API_KEY="dummy"   # Ollama openai-compat aceita dummy
+#
+# Trocar TODOS os <PLACEHOLDERS> pelos valores reais do ambiente.
+# ============================================================================
+
+aiMemory:
+  image:
+    repository: ghcr.io/djalmajr/ai-memory-ops/ai-memory   # mirror no registry interno se sem egress
+    tag: latest                                            # fixe sha-<short> em prod
+    pullPolicy: IfNotPresent
+  workspace: my-org            # <WORKSPACE> canônico
+  project: default             # linha-semente; evita o projeto fantasma "scratch"
+  enableWeb: true              # /web + /api/v1
+  webUiDir: /web-ui            # serve a SPA custom embutida na imagem (NÃO exposto no form visual)
+  httpStateful: false          # stateless (curl/HTTP simples); On p/ clientes mcp-remote
+  # Embeddings (busca vetorial) — Ollama openai-compat + qwen3 (cobre pt-BR)
+  embedding:
+    provider: openai
+    baseUrl: http://ollama.ollama.svc:11434/v1   # in-cluster; ou https://ollama.<DOMINIO>/v1
+    model: qwen3-embedding:0.6b
+    dim: "1024"
+  # LLM (consolidação) — opcional; vazio = zero-LLM (rule-based)
+  llm:
+    provider: openai-compat
+    baseUrl: https://<LLM_ENDPOINT>/v1
+    model: <LLM_MODEL>
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 1500m, memory: 2Gi }
+
+# ----------------------------------------------------------------------------
+# ETL — ingesta repos-fonte (GitLab) em páginas wiki via opencode
+# ----------------------------------------------------------------------------
+config:
+  language: pt-BR
+  wiki:
+    branch: main
+    # Repo DESTINO do conteúdo consolidado (wiki-content). Token = GITLAB_API_TOKEN.
+    repoUrl: https://gitlab.<DOMINIO>/<grupo>/ai-memory-content.git
+    # Repos FONTE ingeridos (1 projeto por source).
+    sources:
+      - name: sample-project
+        repoUrl: https://gitlab.<DOMINIO>/<grupo>/sample-project.git
+        branch: main
+  openCode:
+    model: opencode-go/kimi-k2.6
+    providers:
+      opencode-go:
+        npm: "@ai-sdk/openai-compatible"
+        name: "OpenCode Go"
+        options:
+          baseURL: "https://<OPENCODE_ENDPOINT>/v1"
+          apiKey: "{env:OPENCODE_API_KEY}"
+        models:
+          kimi-k2.6:
+            name: "Kimi K2.6"
+
+etl:
+  enabled: true
+  schedule: "0 0 * * *"        # diário 00:00
+  suspend: false
+  runIndexer: true             # roda `ai-memory embed` no fim (precisa embeddings acima)
+  image:
+    repository: ghcr.io/djalmajr/ai-memory-ops/etl
+    tag: latest
+    pullPolicy: IfNotPresent
+  git:
+    userName: "ai-memory-bot"
+    userEmail: "ai-memory-bot@<DOMINIO>"
+
+# ----------------------------------------------------------------------------
+# Ingress — nginx (auto-detect) + base path + TLS via cert-manager
+# ----------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: auto                       # resolve nginx; force "nginx" se quiser
+  host: memory.<DOMINIO>               # <DNS público>
+  path: /knowledge-center              # host dedicado → use "/" e stripPathPrefix:false
+  stripPathPrefix: true
+  tls:
+    enabled: true
+    secretName: knowledge-center-tls
+  # cert-manager: NÃO há campo no form visual → defina aqui (emite o cert do TLS acima)
+  annotations:
+    cert-manager.io/cluster-issuer: <CLUSTER_ISSUER>   # ex.: letsencrypt-prod / <ca-issuer>
+
+# ----------------------------------------------------------------------------
+# Auth — mcp-auth (Keycloak) no /mcp + oauth2-proxy (login browser) no /web
+# ----------------------------------------------------------------------------
+mcpAuth:
+  enabled: true
+  image:
+    repository: ghcr.io/djalmajr/ai-memory-ops/mcp-auth
+    tag: latest
+  oidc:
+    issuer: https://keycloak.<DOMINIO>/realms/<REALM>   # realm com roles mcp:read/mcp:write
+    audience: ""
+  oauth:
+    enabled: true        # RFC 9728 → clientes MCP autodescobrem o Keycloak (PKCE)
+    scopes: "mcp:read mcp:write offline_access profile"
+
+# Login interativo no browser p/ /web e /api/v1. Requer os 2 Secrets externos:
+#   oauth2-proxy-config (alpha-config + cookie-secret) e oauth2-proxy-ca (ca.crt).
+# Desligue (enabled:false) se só for usar /mcp por máquina.
+oauth2Proxy:
+  enabled: true
+  configSecretName: oauth2-proxy-config
+  caSecretName: oauth2-proxy-ca
+  redirectUrl: https://memory.<DOMINIO>/knowledge-center/oauth2/callback
+  cookieDomains: memory.<DOMINIO>
+  whitelistDomains: memory.<DOMINIO>
+
+# ----------------------------------------------------------------------------
+# Persistência + Secrets
+# ----------------------------------------------------------------------------
+persistence:
+  accessMode: ReadWriteOnce
+  storageClass: ""        # vazio = default do cluster
+  size: 20Gi
+
+secrets:
+  create: false           # PROD: criar o Secret <release>-secrets externamente (ver cabeçalho)
+
+# Webhooks/monitoring opcionais — habilite conforme necessidade
+webhooks:
+  contributors:
+    enabled: true         # atribui autoria (agent/user/client) em frontmatter.contributors
+  gitMirror:
+    enabled: false        # backup git externo (requer deploy key SSH)
+monitoring:
+  capacity:
+    enabled: false
