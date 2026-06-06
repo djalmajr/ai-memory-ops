@@ -212,18 +212,23 @@ spec:
             failureThreshold: 30
             periodSeconds: 5
           livenessProbe:
-            {{- if or .Values.aiMemory.tolerateMigrationDivergence (and .Values.ingress.enabled (ne (.Values.ingress.path | default "/") "/") (not .Values.ingress.stripPathPrefix)) }}
-            # tcpSocket liveness when EITHER:
-            #  - migration-tolerant (fork) mode: `ai-memory status` opens the store
-            #    strictly and aborts on the very divergence `serve` was told to tolerate; OR
-            #  - base-path mode (AI_MEMORY_BASE_PATH set): `ai-memory status` is an HTTP
-            #    client against 127.0.0.1:49374/status and is NOT base-path aware, so it
-            #    404s under the prefix and would kill a healthy server.
-            # Either way, fall back to a port-based liveness.
+            {{- if .Values.aiMemory.tolerateMigrationDivergence }}
+            # tcpSocket liveness in migration-tolerant (fork) mode: `ai-memory status`
+            # opens the store strictly and aborts on the very divergence `serve` was
+            # told to tolerate, which would kill a healthy server. Fall back to a
+            # port-based liveness.
+            #
+            # NOTE: base-path mode no longer forces tcpSocket. `ai-memory status` is
+            # now base-path aware (honours AI_MEMORY_BASE_PATH → hits the prefixed
+            # admin route instead of 404ing — engine carries the CLI base-path fix,
+            # upstream akitaonrails/ai-memory#82), so the exec probe below works under
+            # a URL prefix too.
             tcpSocket:
               port: http
             {{- else }}
-            # `ai-memory status` is an HTTP client against 127.0.0.1:49374 (Host allowed).
+            # `ai-memory status` is an HTTP client against 127.0.0.1:49374 (Host
+            # allowed) and is base-path aware (honours AI_MEMORY_BASE_PATH), so it
+            # works whether the engine is hosted at the root or under a prefix.
             exec:
               command: ["/usr/local/bin/ai-memory", "status"]
             {{- end }}
