@@ -30,9 +30,9 @@ on:
         required: false
         default: ""
       engine_ref:
-        description: "ai-memory engine git ref to build (AI_MEMORY_REF build-arg). Only the ai-memory image reads it; the others ignore it. Defaults to the deploy line."
+        description: "ai-memory engine git ref to build (AI_MEMORY_REF build-arg). Only the ai-memory image reads it; the others ignore it. Defaults to main (upstream-tracking; deploy-v2 retired)."
         required: false
-        default: "deploy-v2"
+        default: "main"
 
 permissions:
   contents: read
@@ -117,10 +117,10 @@ jobs:
           push: true
           # Only the ai-memory Dockerfile declares AI_MEMORY_REF; the other
           # images don't and harmlessly ignore it (buildkit warns, no effect).
-          # Empty inputs.engine_ref (push/tag triggers) falls back to deploy-v2,
-          # matching the Dockerfile default — so non-dispatch builds are unchanged.
+          # Empty inputs.engine_ref (push/tag triggers) falls back to main,
+          # matching the Dockerfile default — so non-dispatch builds track upstream.
           build-args: |
-            AI_MEMORY_REF=${{ github.event.inputs.engine_ref || 'deploy-v2' }}
+            AI_MEMORY_REF=${{ github.event.inputs.engine_ref || 'main' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.image.name }}

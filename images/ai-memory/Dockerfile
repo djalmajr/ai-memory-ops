@@ -15,17 +15,17 @@
 #     -t registry.example.com/<grupo>/ai-memory:<ver>
 
 ARG AI_MEMORY_REPO=https://github.com/djalmajr/ai-memory.git
-# Default to the `deploy-v2` integration branch: upstream/main (which already
-# absorbed admission webhooks, read-page resolver, FTS path-index, write-target
-# active-workspace) + only the still-unmerged operator deltas (move-project +
-# its admission wiring, and the strip-runbook-title-prefix wiki migration).
-# Each topic branch stays independent off `main` for clean upstream PRs;
-# `deploy-v2` is the operator's consolidated deploy line and is never submitted
-# upstream. The old `deploy` branch is kept as legacy/rollback. Override at
-# build time for a cut:
-#   --build-arg AI_MEMORY_REF=feat/move-project  # move-project only
-#   --build-arg AI_MEMORY_REF=main               # plain fork main
-ARG AI_MEMORY_REF=deploy-v2
+# Default to `main` — the fork's main, kept in sync with upstream/main.
+# The former `deploy-v2` integration line (operator fork: migration-divergence
+# tolerance + a strip-runbook-title-prefix migration) was RETIRED once both
+# instances were rebuilt onto a clean upstream lineage via `ai-memory reindex`
+# (reindex-from-wiki landed upstream in #86 / v0.13.0). Every earlier operator
+# delta — move-project, per-actor auto-scope, base-path CLI, delete-page,
+# FTS path-index — is now upstream, so `main` is the deploy line. Override at
+# build time (or via the build-images `engine_ref` input) for a one-off cut:
+#   --build-arg AI_MEMORY_REF=v0.13.0        # a specific release tag
+#   --build-arg AI_MEMORY_REF=feat/whatever  # a topic branch
+ARG AI_MEMORY_REF=main
 ARG AI_MEMORY_UI_REPO=https://github.com/djalmajr/ai-memory-ui.git
 ARG AI_MEMORY_UI_REF=main
 
