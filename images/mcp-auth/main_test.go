@@ -158,3 +158,103 @@ func TestWellKnownIsPublicPath(t *testing.T) {
 		}
 	}
 }
+
+// Lifecycle-hook token tests. None of them require Keycloak: the hook-token
+// branch returns before the JWKS is consulted, and the fall-through paths hit
+// the jwks==nil guard (401) under test.
+
+func setupHookToken(t *testing.T) {
+	t.Helper()
+	oauthEnabled = false
+	hookAuthToken = "hook-secret"
+	hookAuthUsername = "djalmajr"
+	upstreamAuthToken = "upstream-static"
+	t.Cleanup(func() {
+		hookAuthToken = ""
+		hookAuthUsername = ""
+		upstreamAuthToken = ""
+	})
+}
+
+func verifyWith(method, uri, bearer string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("X-Forwarded-Method", method)
+	req.Header.Set("X-Forwarded-Uri", uri)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	rec := httptest.NewRecorder()
+	handleVerify(rec, req)
+	return rec
+}
+
+func TestVerifyHookTokenOnHookPath(t *testing.T) {
+	setupHookToken(t)
+	rec := verifyWith("POST", "/wiki/hook?event=pre-tool-use&agent=claude-code", "hook-secret")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Memory-Actor-User"); got != "djalmajr" {
+		t.Errorf("X-Memory-Actor-User = %q, want djalmajr", got)
+	}
+	if got := rec.Header().Get("X-Auth-Username"); got != "djalmajr" {
+		t.Errorf("X-Auth-Username = %q, want djalmajr", got)
+	}
+	if got := rec.Header().Get("Authorization"); got != "Bearer upstream-static" {
+		t.Errorf("Authorization = %q, want the injected upstream bearer", got)
+	}
+}
+
+func TestVerifyHookTokenOnHandoffPath(t *testing.T) {
+	setupHookToken(t)
+	rec := verifyWith("GET", "/handoff?agent=claude-code", "hook-secret")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestVerifyHookTokenRejectedOutsideHookPaths(t *testing.T) {
+	setupHookToken(t)
+	rec := verifyWith("POST", "/wiki/mcp", "hook-secret")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 — hook token must not work outside /hook|/handoff", rec.Code)
+	}
+}
+
+func TestVerifyHookTokenWrongTokenFallsThrough(t *testing.T) {
+	setupHookToken(t)
+	rec := verifyWith("POST", "/wiki/hook?event=stop&agent=claude-code", "not-the-secret")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 for a wrong hook token", rec.Code)
+	}
+	if got := rec.Header().Get("Authorization"); got != "" {
+		t.Errorf("Authorization = %q, want empty (no upstream injection on 401)", got)
+	}
+}
+
+func TestVerifyHookTokenDisabledKeepsCurrentBehavior(t *testing.T) {
+	oauthEnabled = false
+	hookAuthToken = ""
+	rec := verifyWith("POST", "/wiki/hook?event=stop&agent=claude-code", "hook-secret")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 when HOOK_AUTH_TOKEN is unset", rec.Code)
+	}
+}
+
+func TestIsHookPath(t *testing.T) {
+	cases := map[string]bool{
+		"/hook":                          true,
+		"/handoff":                       true,
+		"/wiki/hook?event=stop&agent=cc": true,
+		"/wiki/handoff?agent=cc":         true,
+		"/wiki/mcp":                      false,
+		"/mcp/hook":                      false,
+		"/wiki/hooks":                    false,
+		"/wiki/pages/hook":               false,
+	}
+	for uri, want := range cases {
+		if got := isHookPath(uri); got != want {
+			t.Errorf("isHookPath(%q) = %v, want %v", uri, got, want)
+		}
+	}
+}

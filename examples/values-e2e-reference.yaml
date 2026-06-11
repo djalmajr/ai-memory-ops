@@ -13,6 +13,7 @@
 # ANTES: criar o Secret out-of-band (NÃO é templado pelo chart):
 #   kubectl -n knowledge-center create secret generic ai-memory-svc-secrets \
 #     --from-literal=AI_MEMORY_AUTH_TOKEN="$(openssl rand -hex 24)" \
+#     --from-literal=HOOK_AUTH_TOKEN="$(openssl rand -hex 24)" \   # opcional: bearer dos lifecycle hooks (/hook, /handoff)
 #     --from-literal=GITLAB_API_TOKEN="<pat read_repository+write_repository>" \
 #     --from-literal=OPENCODE_API_KEY="<opencode plan key>" \
 #     --from-literal=OPENAI_API_KEY="dummy"   # Ollama openai-compat aceita dummy
@@ -115,6 +116,12 @@ mcpAuth:
   oauth:
     enabled: true        # RFC 9728 → clientes MCP autodescobrem o Keycloak (PKCE)
     scopes: "mcp:read mcp:write offline_access profile"
+  # Hooks de lifecycle dos agentes (POST /hook, GET /handoff) são headless —
+  # autenticam com bearer estático dedicado, NUNCA com JWT interativo. O token
+  # vai no Secret externo (key opcional HOOK_AUTH_TOKEN; ausente = desligado):
+  #   --from-literal=HOOK_AUTH_TOKEN="$(openssl rand -hex 24)"
+  hookAuth:
+    username: <USUARIO>  # atribuição (X-Memory-Actor-User) das escritas vindas dos hooks
 
 # Login interativo no browser p/ /web e /api/v1. Requer os 2 Secrets externos:
 #   oauth2-proxy-config (alpha-config + cookie-secret) e oauth2-proxy-ca (ca.crt).

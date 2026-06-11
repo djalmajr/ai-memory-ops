@@ -26,10 +26,14 @@ Traefik calls with headers `X-Forwarded-Method`, `X-Forwarded-Uri`, `X-Forwarded
 
 1. Path in allowlist (probes `/healthz`, `/readyz`)? → 200 without checking the token.
 2. `Authorization: Bearer <jwt>` header missing? → **401**.
-3. JWT parse fails / invalid sig / expired / issuer ≠ `OIDC_ISSUER`? → **401**.
-4. `OIDC_AUDIENCE` configured and `aud` claim does not match? → **401**.
-5. Route requires `mcp:write` but claims do not have it? → **403**.
-6. OK → useful response headers (`X-Auth-Email`, `X-Auth-Username`, `X-Auth-Sub`) → **200**.
+3. `HOOK_AUTH_TOKEN` set + route is `/hook` or `/handoff` + bearer matches it
+   (constant-time)? → **200** with `X-Memory-Actor-User`/`X-Auth-Username` from
+   `HOOK_AUTH_USERNAME` and the upstream bearer injected. Anywhere else the same
+   token falls through to JWT validation below (and fails).
+4. JWT parse fails / invalid sig / expired / issuer ≠ `OIDC_ISSUER`? → **401**.
+5. `OIDC_AUDIENCE` configured and `aud` claim does not match? → **401**.
+6. Route requires `mcp:write` but claims do not have it? → **403**.
+7. OK → useful response headers (`X-Auth-Email`, `X-Auth-Username`, `X-Auth-Sub`) → **200**.
 
 ### Route → role mapping
 
@@ -49,6 +53,8 @@ Conservative: everything is `mcp:read` until proven otherwise; explicit write ro
 |---|---|---|---|
 | `OIDC_ISSUER` | **yes** | — | `https://keycloak.example.com/realms/ai-memory-svc` (lab) |
 | `OIDC_AUDIENCE` | no | `""` (not checked) | If set, requires the `aud` claim in the JWT |
+| `HOOK_AUTH_TOKEN` | no | `""` (off) | Static bearer accepted ONLY on `/hook` and `/handoff` (agent lifecycle hooks are headless — no interactive OAuth). Constant-time compare |
+| `HOOK_AUTH_USERNAME` | no | `""` | Username propagated as `X-Auth-Username` / `X-Memory-Actor-User` when the hook token matches |
 | `PORT` | no | `8081` | validator HTTP port |
 | `LOG_LEVEL` | no | `info` | `debug` / `info` / `warn` / `error` |
 | `JWKS_REFRESH_SECONDS` | no | `300` | JWKS cache TTL |

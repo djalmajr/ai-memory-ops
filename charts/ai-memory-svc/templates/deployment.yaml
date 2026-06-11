@@ -284,6 +284,18 @@ spec:
                   name: {{ include "ai-memory-svc.secretName" . }}
                   key: AI_MEMORY_AUTH_TOKEN
                   optional: true
+            # Lifecycle-hook static bearer (accepted ONLY on /hook and /handoff).
+            # OPTIONAL: absent Secret key = feature off (JWT-only behavior).
+            - name: HOOK_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ai-memory-svc.secretName" . }}
+                  key: HOOK_AUTH_TOKEN
+                  optional: true
+            {{- with (.Values.mcpAuth.hookAuth).username }}
+            - name: HOOK_AUTH_USERNAME
+              value: {{ . | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.mcpAuth.resources | nindent 12 }}
           livenessProbe:

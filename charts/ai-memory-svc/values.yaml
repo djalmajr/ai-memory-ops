@@ -336,6 +336,12 @@ mcpAuth:
     resource: ""                                    # e.g. "https://platform.example.com/wiki/mcp"
     metadataUrl: ""                                 # e.g. "https://platform.example.com/wiki/.well-known/oauth-protected-resource"
     scopes: "mcp:read mcp:write"
+  # Lifecycle-hook token — static bearer accepted ONLY on /hook and /handoff
+  # (agent hooks are headless and cannot run an interactive OAuth flow). The
+  # token itself lives in the external Secret <release>-secrets under the
+  # OPTIONAL key HOOK_AUTH_TOKEN: absent key = feature off, JWT-only behavior.
+  hookAuth:
+    username: ""                                    # propagated as X-Memory-Actor-User on hook-token requests
   resources:
     requests: { cpu: 25m, memory: 32Mi }
     limits:   { cpu: 200m, memory: 128Mi }

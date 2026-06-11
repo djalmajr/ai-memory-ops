@@ -19,6 +19,12 @@
 //
 //	OIDC_ISSUER         (required) — https://keycloak.example.com/realms/ai-memory-svc
 //	OIDC_AUDIENCE       (optional) — expects this aud in the JWT (default: empty = not checked)
+//	HOOK_AUTH_TOKEN     (optional) — static bearer accepted ONLY on the lifecycle-hook
+//	                     routes (/hook, /handoff). Agent hooks are headless batch calls
+//	                     that cannot run an interactive OAuth flow; outside those routes
+//	                     the same token falls through to JWT validation (and fails).
+//	HOOK_AUTH_USERNAME  (optional) — username propagated as X-Auth-Username /
+//	                     X-Memory-Actor-User when the hook token matches.
 //	PORT                (default 8081)
 //	LOG_LEVEL           (default info; debug|info|warn|error)
 //	JWKS_REFRESH_SECONDS (default 300 = 5min)
@@ -28,6 +34,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -43,12 +50,14 @@ import (
 )
 
 var (
-	logger     *slog.Logger
-	jwks       keyfunc.Keyfunc
-	jwksReady  bool
+	logger            *slog.Logger
+	jwks              keyfunc.Keyfunc
+	jwksReady         bool
 	oidcIssuer        string
 	oidcAud           string
 	upstreamAuthToken string // optional: if set, injects Authorization: Bearer <token> into the upstream after validating the JWT (ai-memory uses a static AI_MEMORY_AUTH_TOKEN and does not validate JWT)
+	hookAuthToken     string // optional: static bearer for the lifecycle-hook routes only (/hook, /handoff) — see HOOK_AUTH_TOKEN above
+	hookAuthUsername  string // optional: username propagated to the actor headers when hookAuthToken matches
 	httpClient        = &http.Client{Timeout: 10 * time.Second}
 
 	// OAuth protected resource. When oauthEnabled, the
@@ -64,8 +73,10 @@ var (
 func main() {
 	port := envOr("PORT", "8081")
 	oidcIssuer = strings.TrimRight(envRequired("OIDC_ISSUER"), "/")
-	oidcAud = os.Getenv("OIDC_AUDIENCE") // optional
+	oidcAud = os.Getenv("OIDC_AUDIENCE")                 // optional
 	upstreamAuthToken = os.Getenv("UPSTREAM_AUTH_TOKEN") // optional: static token injected into the upstream
+	hookAuthToken = os.Getenv("HOOK_AUTH_TOKEN")         // optional: static bearer for /hook and /handoff only
+	hookAuthUsername = os.Getenv("HOOK_AUTH_USERNAME")   // optional: actor username for hook-token requests
 	refresh := envIntOr("JWKS_REFRESH_SECONDS", 300)
 
 	// OAuth protected resource. Opt-in via OAUTH_ENABLED=true.
@@ -89,6 +100,7 @@ func main() {
 		"oidc_issuer", oidcIssuer,
 		"oidc_audience", oidcAud,
 		"upstream_token_inject", upstreamAuthToken != "",
+		"hook_token_enabled", hookAuthToken != "",
 		"jwks_refresh_seconds", refresh,
 		"oauth_enabled", oauthEnabled,
 		"oauth_resource", oauthResource,
@@ -292,7 +304,43 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	tokenStr := strings.TrimPrefix(authHeader, prefix)
 
+	// Lifecycle-hook shortcut: agent hooks (POST /hook, GET /handoff) are
+	// headless batch calls that cannot run an interactive OAuth flow, so they
+	// authenticate with a dedicated static token. Honoured ONLY on the hook
+	// routes — the same token anywhere else falls through to JWT validation
+	// (and fails). Constant-time compare; never logs the token.
+	if hookAuthToken != "" && isHookPath(uri) &&
+		subtle.ConstantTimeCompare([]byte(tokenStr), []byte(hookAuthToken)) == 1 {
+		logger.Info("verify_ok",
+			"mode", "hook_token",
+			"method", method,
+			"uri", uri,
+			"ip", ip,
+			"elapsed_ms", time.Since(start).Milliseconds(),
+		)
+		if hookAuthUsername != "" {
+			w.Header().Set("X-Auth-Username", hookAuthUsername)
+			w.Header().Set("X-Memory-Actor-User", hookAuthUsername)
+		}
+		if upstreamAuthToken != "" {
+			w.Header().Set("Authorization", "Bearer "+upstreamAuthToken)
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	// Validate JWT
+	if jwks == nil {
+		logger.Error("verify_unauthorized",
+			"reason", "jwks_unavailable",
+			"uri", uri,
+			"ip", ip,
+			"elapsed_ms", time.Since(start).Milliseconds(),
+		)
+		setChallenge(w, r)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
 	claims := jwt.MapClaims{}
 	token, err := jwt.ParseWithClaims(tokenStr, claims, jwks.Keyfunc,
 		jwt.WithValidMethods([]string{"RS256"}),
@@ -414,6 +462,17 @@ func isPublicPath(uri string) bool {
 		return true
 	}
 	return strings.HasSuffix(uri, "/.well-known/oauth-protected-resource")
+}
+
+// isHookPath matches the engine's lifecycle-hook routes (with or without the
+// /wiki base path), mirroring isPublicPath's handling of both ingress shapes.
+// Exact path match only — query string is stripped, nothing else is accepted.
+func isHookPath(uri string) bool {
+	if idx := strings.Index(uri, "?"); idx >= 0 {
+		uri = uri[:idx]
+	}
+	hookPaths := []string{"/hook", "/handoff", "/wiki/hook", "/wiki/handoff"}
+	return slices.Contains(hookPaths, uri)
 }
 
 // roleForRoute decides which realm-level role the route requires.
