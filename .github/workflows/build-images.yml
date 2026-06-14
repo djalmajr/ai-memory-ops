@@ -123,5 +123,11 @@ jobs:
             AI_MEMORY_REF=${{ github.event.inputs.engine_ref || 'main' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.image.name }}
-          cache-to: type=gha,scope=${{ matrix.image.name }},mode=max
+          # Registry-backed buildx cache (was type=gha; the GitHub Actions
+          # cache backend started returning HTTP 422 on cache load, failing
+          # the ai-memory image build). Registry cache is backend-independent:
+          # stored as a `:buildcache` image in the same GHCR repo, pushed/pulled
+          # with the GHCR login already done above. A missing ref (first run) is
+          # a non-fatal cache miss, not a hard error.
+          cache-from: type=registry,ref=ghcr.io/djalmajr/ai-memory-ops/${{ matrix.image.name }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/djalmajr/ai-memory-ops/${{ matrix.image.name }}:buildcache,mode=max
