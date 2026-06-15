@@ -407,6 +407,36 @@ oauth2Proxy:
     limits:   { cpu: 200m, memory: 128Mi }
 
 # ----------------------------------------------------------------------------
+# Optional one-time Keycloak realm bootstrap (clients + roles + group).
+# OFF by default — most operators run scripts/kc-bootstrap.sh by hand via
+# `kubectl exec` into the Keycloak pod (see KEYCLOAK-BOOTSTRAP.md). Enable this
+# to run the SAME idempotent script as a post-install/post-upgrade Helm hook Job.
+# ----------------------------------------------------------------------------
+keycloakBootstrap:
+  enabled: false
+  # kcadm base URL reachable from the cluster, incl. any legacy /auth suffix
+  # (e.g. http://keycloak.<ns>.svc:8080  or  .../auth).
+  serverUrl: ""
+  realm: ""               # target realm (the realm in mcpAuth.oidc.issuer)
+  publicUrl: ""           # public base URL incl. base path, no trailing slash
+                          # (e.g. https://host  or  https://host/wiki)
+  group: ai-memory        # realm group that carries mcp:read/mcp:write
+  # Override the client ids (default to the script's: ai-memory-oauth2-proxy,
+  # ai-memory-mcp, ai-memory-cli) — e.g. when several instances share one realm.
+  oauth2ClientId: ""
+  mcpClientId: ""
+  deviceClientId: ""
+  # An image shipping /opt/keycloak/bin/kcadm.sh (typically your Keycloak image).
+  image: ""
+  imagePullPolicy: IfNotPresent
+  # Existing secret holding the master-realm admin credentials (never templated
+  # into the manifest — referenced via secretKeyRef).
+  adminSecret:
+    name: ""
+    userKey: KEYCLOAK_ADMIN
+    passwordKey: KEYCLOAK_ADMIN_PASSWORD
+
+# ----------------------------------------------------------------------------
 # RBAC scoped for deploy via CI: it is NOT in the chart (it would be circular — the helm run
 # by the SA itself would need to manage rbac.* resources, which K8s blocks as escalation).
 # Applied at bootstrap by an admin: deploy/rbac-deployer.yaml. See infra runbook 08.

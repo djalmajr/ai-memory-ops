@@ -1,0 +1,20 @@
+{{- /*
+ConfigMap carrying scripts/kc-bootstrap.sh for the optional Keycloak bootstrap
+Job (keycloakBootstrap.enabled). Loaded via .Files.Get so the by-hand path and
+the Job share ONE source of truth. Hook-weight 0 so it exists before the Job.
+*/ -}}
+{{- if .Values.keycloakBootstrap.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-keycloak-bootstrap
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+data:
+  kc-bootstrap.sh: |
+{{ .Files.Get "scripts/kc-bootstrap.sh" | indent 4 }}
+{{- end }}
