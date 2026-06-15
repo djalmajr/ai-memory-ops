@@ -332,7 +332,7 @@ questions:
   # ==================== Persistence ====================
   - variable: persistence.storageClass
     label: "Storage Class"
-    description: "Empty = cluster default. On the Serpro/Oracle cluster the default is 'oci-bv' (RWO)."
+    description: "Empty = cluster default. Otherwise set your provider's RWO StorageClass (e.g. 'standard-rwo')."
     type: storageclass
     default: ""
     group: "Persistence"
