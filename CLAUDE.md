@@ -2,6 +2,26 @@
 
 Ops repo for the ai-memory instance (Helm chart, deploy assets, examples).
 
+## Operator runbook: granting a developer memory access
+
+Access to a Keycloak-gated instance is two steps, and only the **first** needs
+an operator — the developer does the second themselves:
+
+1. **Operator grants the role.** Add the developer to the realm `ai-memory`
+   group (it carries `mcp:read`/`mcp:write`) with
+   [`scripts/kc-add-user.sh`](charts/ai-memory-svc/scripts/kc-add-user.sh). Run
+   it inside the Keycloak pod so the admin secret never leaves the cluster — see
+   [`KEYCLOAK-BOOTSTRAP.md`](charts/ai-memory-svc/KEYCLOAK-BOOTSTRAP.md) →
+   "Onboarding a developer → Step 1".
+2. **Developer onboards.** They run the device login + `install-hooks` via the
+   `aim-init` skill (no operator, no static token).
+
+When asked to "grant `<dev>` access to `<instance>`", drive `kc-add-user.sh`
+with that instance's values. Instance-specific values (Keycloak namespace, pod
+selector, realm, host) are **not** in this public repo — resolve them from your
+kubeconfig context or the private ops runbook in ai-memory; never hardcode an
+instance into the repo.
+
 <!-- ai-memory:start -->
 ## Long-term memory (ai-memory)
 
