@@ -33,3 +33,14 @@ To trigger the ETL on-demand (Job from the CronJob):
 
   kubectl --namespace {{ .Release.Namespace }} create job --from=cronjob/{{ $fullName }}-etl etl-manual-$(date +%s)
 {{- end }}
+{{- if and (.Values.webhooks.scopeGuard).enabled (not (.Values.mcpAuth.hookAuth).username) (not .Values.aiMemory.rootUsername) }}
+
+⚠️  scope-guard is ENABLED but no actor username is configured.
+    Hook captures that authenticate with the static HOOK_AUTH_TOKEN land with an
+    EMPTY actor and are rejected at admission — silent capture loss, visible only
+    in the engine log as `scope-guard: user '' not allowed to write_page …`.
+    Fix: set `mcpAuth.hookAuth.username` to a user present in
+    `webhooks.scopeGuard.rules` (single-operator / static-token instances), or
+    rely on OIDC (whose JWT carries the actor). `aiMemory.rootUsername` covers
+    the rung-1/MCP path but NOT the hook path.
+{{- end }}
