@@ -467,11 +467,18 @@ func isPublicPath(uri string) bool {
 // isHookPath matches the engine's lifecycle-hook routes (with or without the
 // /wiki base path), mirroring isPublicPath's handling of both ingress shapes.
 // Exact path match only — query string is stripped, nothing else is accepted.
+// `/hook/batch` is the batched sibling of `/hook` (many spooled events in one
+// request); it shares the same auth model, so the static HOOK_AUTH_TOKEN
+// shortcut must honour it too — otherwise a static-token client's batch drain
+// 401s and silently falls back to per-event `/hook`.
 func isHookPath(uri string) bool {
 	if idx := strings.Index(uri, "?"); idx >= 0 {
 		uri = uri[:idx]
 	}
-	hookPaths := []string{"/hook", "/handoff", "/wiki/hook", "/wiki/handoff"}
+	hookPaths := []string{
+		"/hook", "/hook/batch", "/handoff",
+		"/wiki/hook", "/wiki/hook/batch", "/wiki/handoff",
+	}
 	return slices.Contains(hookPaths, uri)
 }
 
