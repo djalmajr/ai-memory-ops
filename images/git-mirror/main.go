@@ -206,6 +206,23 @@ func (m *mirror) runIn(ctx context.Context, dir, name string, args ...string) er
 	return nil
 }
 
+// clearStaleIndexLock removes a leftover .git/index.lock before an index op.
+// Safe because every git op on workDir is serialised by m.mu, so any lock
+// present while a caller holds m.mu is ORPHANED — left by a git subprocess
+// killed mid-op (runIn uses exec.CommandContext, so a cancelled admission
+// request kills `git add` and leaves the lock). Without this, the lock wedges
+// EVERY subsequent sync and the backup stops in silence (observed: a 9-day
+// gap, 2026-06). Callers must hold m.mu.
+func (m *mirror) clearStaleIndexLock() {
+	lock := filepath.Join(m.workDir, ".git", "index.lock")
+	switch err := os.Remove(lock); {
+	case err == nil:
+		slog.Warn("removed stale git index.lock", "path", lock)
+	case !errors.Is(err, os.ErrNotExist):
+		slog.Warn("could not remove stale index.lock", "path", lock, "err", err)
+	}
+}
+
 // writePage materializes a single page in the working tree and commits
 // it. The push is handled by the background worker.
 //
@@ -231,6 +248,7 @@ func (m *mirror) writePage(ctx context.Context, p payload) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.clearStaleIndexLock()
 
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
@@ -274,6 +292,7 @@ func (m *mirror) deletePage(ctx context.Context, p payload) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.clearStaleIndexLock()
 
 	relPath, _ := filepath.Rel(m.workDir, full)
 	// `--ignore-unmatch` keeps the op idempotent when the engine replays a
@@ -299,6 +318,7 @@ func (m *mirror) purgeProject(ctx context.Context, p payload) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.clearStaleIndexLock()
 
 	relPath, _ := filepath.Rel(m.workDir, full)
 	if err := m.run(ctx, "git", "rm", "-rf", "--ignore-unmatch", relPath); err != nil {

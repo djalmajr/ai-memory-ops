@@ -64,6 +64,56 @@ func TestWritePageCommitsLocally(t *testing.T) {
 	}
 }
 
+// A leftover .git/index.lock (from a git subprocess killed mid-op, e.g. a
+// cancelled admission request) must not wedge the mirror: writePage heals it
+// before staging. Without clearStaleIndexLock this fails with
+// "Unable to create '.../index.lock': File exists" — the 9-day-silent-backup
+// failure mode observed 2026-06.
+func TestWritePageHealsStaleIndexLock(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "remote.git")
+	work := filepath.Join(dir, "work")
+	must(t, exec.Command("git", "init", "--bare", "-b", "main", bare).Run())
+
+	t.Setenv("REPO_URL", bare)
+	t.Setenv("WORK_DIR", work)
+	t.Setenv("REPO_BRANCH", "main")
+	t.Setenv("GIT_USER", "test")
+	t.Setenv("GIT_EMAIL", "test@example.com")
+	t.Setenv("PUSH_DEBOUNCE", "10ms")
+
+	m := newMirror()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	must(t, m.bootstrap(ctx))
+
+	// Simulate a crashed prior git op leaving an orphaned index.lock.
+	lock := filepath.Join(work, ".git", "index.lock")
+	must(t, os.WriteFile(lock, nil, 0o644))
+
+	p := decodePayload(t, `{
+		"page": { "path": "gotchas/x.md", "frontmatter": {"title":"X"}, "body": "hello" },
+		"ctx":  { "workspace": "default", "project": "wiki-service", "actor": { "user": "djalmajr" } }
+	}`)
+	if err := m.writePage(ctx, p); err != nil {
+		t.Fatalf("writePage with a stale index.lock should heal and succeed, got: %v", err)
+	}
+
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Fatalf("stale index.lock should have been removed, stat err=%v", err)
+	}
+	out, err := exec.Command("git", "-C", work, "log", "--oneline").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git log: %v: %s", err, out)
+	}
+	if !strings.Contains(string(out), "sync wiki/default/wiki-service/gotchas/x.md") {
+		t.Fatalf("commit not found in log:\n%s", out)
+	}
+}
+
 func TestSafeJoinRejectsTraversal(t *testing.T) {
 	base := t.TempDir()
 	if _, err := safeJoin(base, "../etc/passwd"); err == nil {
