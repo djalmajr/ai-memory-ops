@@ -1,6 +1,8 @@
-# Build + push the 5 container images of ai-memory-ops to GHCR.
+# Build + push the active container images of ai-memory-ops to GHCR.
 #
-# Targets: ghcr.io/djalmajr/ai-memory-ops/{ai-memory,mcp-auth,etl,contributors,git-mirror}
+# Targets: ghcr.io/djalmajr/ai-memory-ops/{ai-memory,mcp-auth,contributors,git-mirror,scope-guard}
+# The legacy ETL image is intentionally excluded while the chart keeps ETL
+# disabled in the deployed environments.
 #
 # Triggers:
 # - push to main when images/** or this workflow change (auto-rebuild on edits)
@@ -55,9 +57,6 @@ jobs:
           - name: mcp-auth
             context: images/mcp-auth
             dockerfile: images/mcp-auth/Dockerfile
-          - name: etl
-            context: images/etl
-            dockerfile: images/etl/Dockerfile
           - name: contributors
             context: images/contributors
             dockerfile: images/contributors/Dockerfile
