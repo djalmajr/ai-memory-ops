@@ -398,7 +398,18 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 		"ip", ip,
 		"elapsed_ms", time.Since(start).Milliseconds(),
 	)
-	// Propagate useful claims to the backend (the MCP server).
+	propagateIdentityHeaders(w, claims)
+	// Injects the static upstream bearer (ai-memory require_bearer) when configured.
+	// Traefik copies this header via authResponseHeaders, swapping the JWT (which ai-memory
+	// does not validate) for the static token it expects. Empty = passes the original Authorization.
+	if upstreamAuthToken != "" {
+		w.Header().Set("Authorization", "Bearer "+upstreamAuthToken)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func propagateIdentityHeaders(w http.ResponseWriter, claims jwt.MapClaims) {
+	sub, _ := claims["sub"].(string)
 	if email, _ := claims["email"].(string); email != "" {
 		w.Header().Set("X-Auth-Email", email)
 	}
@@ -420,7 +431,10 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 	//   azp  (authorized party / DCR client UUID)     → X-Memory-Actor-Client
 	//   client_name  (DCR registered name, optional)  → X-Memory-Actor-Agent
 	//                  (falls back to azp when absent so the header is never blank)
-	//   sid  (session id, optional)                   → X-Memory-Actor-Session-Id
+	//
+	// A Keycloak/OIDC `sid` claim is deliberately NOT mapped to
+	// X-Memory-Actor-Session-Id. That header is reserved for ai-memory's real
+	// lifecycle-hook session id, not the provider login/browser session.
 	if username, _ := claims["preferred_username"].(string); username != "" {
 		w.Header().Set("X-Memory-Actor-User", username)
 	}
@@ -438,16 +452,6 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 	if clientName != "" {
 		w.Header().Set("X-Memory-Actor-Agent", clientName)
 	}
-	if sid, _ := claims["sid"].(string); sid != "" {
-		w.Header().Set("X-Memory-Actor-Session-Id", sid)
-	}
-	// Injects the static upstream bearer (ai-memory require_bearer) when configured.
-	// Traefik copies this header via authResponseHeaders, swapping the JWT (which ai-memory
-	// does not validate) for the static token it expects. Empty = passes the original Authorization.
-	if upstreamAuthToken != "" {
-		w.Header().Set("Authorization", "Bearer "+upstreamAuthToken)
-	}
-	w.WriteHeader(http.StatusOK)
 }
 
 // isPublicPath allows k8s probes without auth.

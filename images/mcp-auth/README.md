@@ -33,7 +33,14 @@ Traefik calls with headers `X-Forwarded-Method`, `X-Forwarded-Uri`, `X-Forwarded
 4. JWT parse fails / invalid sig / expired / issuer ≠ `OIDC_ISSUER`? → **401**.
 5. `OIDC_AUDIENCE` configured and `aud` claim does not match? → **401**.
 6. Route requires `mcp:write` but claims do not have it? → **403**.
-7. OK → useful response headers (`X-Auth-Email`, `X-Auth-Username`, `X-Auth-Sub`) → **200**.
+7. OK → useful response headers (`X-Auth-Email`, `X-Auth-Username`,
+   `X-Auth-Sub`, `X-Memory-Actor-User`, `X-Memory-Actor-Sub`,
+   `X-Memory-Actor-Client`, `X-Memory-Actor-Agent`) → **200**.
+
+The Keycloak/OIDC `sid` claim is not propagated as
+`X-Memory-Actor-Session-Id`. ai-memory reserves that header for the real
+lifecycle-hook session id from a coding-agent run; a provider login session is a
+different concept.
 
 ### Route → role mapping
 

@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestMain(m *testing.M) {
@@ -202,6 +204,46 @@ func TestVerifyHookTokenOnHookPath(t *testing.T) {
 	}
 	if got := rec.Header().Get("Authorization"); got != "Bearer upstream-static" {
 		t.Errorf("Authorization = %q, want the injected upstream bearer", got)
+	}
+}
+
+func TestPropagateIdentityHeadersDoesNotUseJwtSidAsActorSession(t *testing.T) {
+	rec := httptest.NewRecorder()
+	claims := jwt.MapClaims{
+		"email":              "dev@example.com",
+		"preferred_username": "djalmajr",
+		"sub":                "user-sub",
+		"azp":                "client-id",
+		"client_name":        "Codex",
+		"sid":                "keycloak-login-session",
+	}
+
+	propagateIdentityHeaders(rec, claims)
+
+	headers := rec.Header()
+	if got := headers.Get("X-Auth-Email"); got != "dev@example.com" {
+		t.Errorf("X-Auth-Email = %q, want dev@example.com", got)
+	}
+	if got := headers.Get("X-Auth-Username"); got != "djalmajr" {
+		t.Errorf("X-Auth-Username = %q, want djalmajr", got)
+	}
+	if got := headers.Get("X-Auth-Sub"); got != "user-sub" {
+		t.Errorf("X-Auth-Sub = %q, want user-sub", got)
+	}
+	if got := headers.Get("X-Memory-Actor-User"); got != "djalmajr" {
+		t.Errorf("X-Memory-Actor-User = %q, want djalmajr", got)
+	}
+	if got := headers.Get("X-Memory-Actor-Sub"); got != "user-sub" {
+		t.Errorf("X-Memory-Actor-Sub = %q, want user-sub", got)
+	}
+	if got := headers.Get("X-Memory-Actor-Client"); got != "client-id" {
+		t.Errorf("X-Memory-Actor-Client = %q, want client-id", got)
+	}
+	if got := headers.Get("X-Memory-Actor-Agent"); got != "Codex" {
+		t.Errorf("X-Memory-Actor-Agent = %q, want Codex", got)
+	}
+	if got := headers.Get("X-Memory-Actor-Session-Id"); got != "" {
+		t.Errorf("X-Memory-Actor-Session-Id = %q, want empty for Keycloak sid", got)
 	}
 }
 
