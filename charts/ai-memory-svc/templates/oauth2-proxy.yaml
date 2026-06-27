@@ -70,9 +70,13 @@ spec:
             {{- end }}
             - name: OAUTH2_PROXY_SKIP_PROVIDER_BUTTON
               value: {{ .Values.oauth2Proxy.skipProviderButton | quote }}
+            {{- if .Values.oauth2Proxy.caSecretName }}
             # In alpha-config the --provider-ca-files/env is ignored; Go reads SSL_CERT_FILE.
+            # Only override when a custom CA is supplied; otherwise Go uses the system bundle
+            # (e.g. a publicly-trusted Let's Encrypt issuer needs no caSecretName).
             - name: SSL_CERT_FILE
               value: {{ .Values.oauth2Proxy.caPath | quote }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 4180
@@ -80,8 +84,10 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /config
+            {{- if .Values.oauth2Proxy.caSecretName }}
             - name: ca
               mountPath: /certs
+            {{- end }}
           resources:
             {{- toYaml .Values.oauth2Proxy.resources | nindent 12 }}
       volumes:
@@ -91,9 +97,11 @@ spec:
             items:
               - key: oauth2-proxy.yaml
                 path: oauth2-proxy.yaml
+        {{- if .Values.oauth2Proxy.caSecretName }}
         - name: ca
           secret:
             secretName: {{ .Values.oauth2Proxy.caSecretName }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
