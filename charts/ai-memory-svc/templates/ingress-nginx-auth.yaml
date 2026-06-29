@@ -60,6 +60,13 @@ metadata:
     nginx.ingress.kubernetes.io/auth-response-headers: "Authorization,X-Auth-Request-Email,X-Auth-Request-User"
     {{- include "ai-memory-svc.nginxOauth2BufferAnnotations" $ | nindent 4 }}
     {{- end }}
+    {{- /* Edge rate-limit on the machine ingest path (/hook) — sheds a hook-capture
+       flood with 429 before it reaches the engine, preventing the OOM-by-ingest
+       failure mode. Per-IP (nginx default key). */}}
+    {{- if and $.Values.ingress.rateLimit.enabled (eq $r.name "hook") }}
+    nginx.ingress.kubernetes.io/limit-rps: {{ $.Values.ingress.rateLimit.average | quote }}
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: {{ $.Values.ingress.rateLimit.nginxBurstMultiplier | quote }}
+    {{- end }}
     {{- with $.Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

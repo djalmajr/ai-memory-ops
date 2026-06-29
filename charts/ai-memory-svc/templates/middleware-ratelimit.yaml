@@ -1,0 +1,20 @@
+{{- if and .Values.ingress.enabled .Values.ingress.host (eq (include "ai-memory-svc.ingressBackend" .) "traefik") .Values.ingress.rateLimit.enabled }}
+# Traefik rateLimit middleware — sheds a client flood (e.g. a swarm/agent spraying
+# hook captures at /hook) at the edge with 429 BEFORE it reaches the engine, so a
+# high request rate can't buffer enough bodies to OOM it. Appended to the catch-all
+# router chain in ingress.yaml (runs before forwardauth, so the flood is rejected
+# without even hitting the mcp-auth round-trip). sourceCriterion defaults to the
+# client IP; behind a single CF tunnel that is effectively a host-global bucket,
+# which is the intended protection for a single-operator instance.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-ratelimit
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+spec:
+  rateLimit:
+    average: {{ .Values.ingress.rateLimit.average }}
+    burst: {{ .Values.ingress.rateLimit.burst }}
+    period: {{ .Values.ingress.rateLimit.period | quote }}
+{{- end }}

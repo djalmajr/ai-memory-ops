@@ -467,6 +467,21 @@ ingress:
   # ai-memory exposes /mcp, /web, /api/v1 at the root → with path=/wiki, stripPathPrefix=true.
   stripPathPrefix: false
   maxBodySize: ""
+  # Edge rate-limit on the engine HTTP surface. Protects the engine from a client
+  # flood (e.g. a swarm/agent spraying hook captures at /hook) that would otherwise
+  # buffer enough request bodies to OOM it — excess is 429'd at the ingress BEFORE
+  # reaching the engine. Backend-aware:
+  #  - Traefik: a rateLimit Middleware appended to the catch-all router chain (the
+  #    chart uses one catch-all Ingress per host, so this is host-global; fine for a
+  #    single-operator instance). period+average = sustained req/s; burst = bucket.
+  #  - nginx: limit-rps + limit-burst-multiplier on the /hook Ingress only (the
+  #    machine ingest path), where the chart already splits routes per path.
+  rateLimit:
+    enabled: false
+    average: 50        # sustained req/s (Traefik average per period; nginx limit-rps)
+    burst: 150         # Traefik burst bucket
+    period: 1s         # Traefik rateLimit period
+    nginxBurstMultiplier: 5   # nginx limit-burst-multiplier on /hook (burst = rps * this)
   annotations: {}
   tls:
     enabled: false

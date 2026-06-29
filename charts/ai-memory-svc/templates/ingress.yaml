@@ -34,6 +34,10 @@ metadata:
     {{- if and .Values.ingress.stripPathPrefix $isPathBased }}
       {{- $mws = append $mws (printf "%s-%s-stripprefix@kubernetescrd" .Release.Namespace (include "ai-memory-svc.fullname" .)) }}
     {{- end }}
+    {{- /* rateLimit runs before forwardauth so a flood is shed without the mcp-auth round-trip. */}}
+    {{- if .Values.ingress.rateLimit.enabled }}
+      {{- $mws = append $mws (printf "%s-%s-ratelimit@kubernetescrd" .Release.Namespace (include "ai-memory-svc.fullname" .)) }}
+    {{- end }}
     {{- if .Values.mcpAuth.enabled }}
       {{- $mws = append $mws (printf "%s-%s-forwardauth@kubernetescrd" .Release.Namespace (include "ai-memory-svc.fullname" .)) }}
     {{- end }}
