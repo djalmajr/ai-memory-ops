@@ -1,0 +1,52 @@
+{{- if and .Values.mcpAuth.enabled .Values.mcpAuth.authServerMetadataAlias.enabled .Values.ingress.host }}
+{{- $a := .Values.mcpAuth.authServerMetadataAlias -}}
+{{- $issuerPath := regexReplaceAll "^https?://[^/]+" (.Values.mcpAuth.oidc.issuer | required "mcpAuth.oidc.issuer is required for authServerMetadataAlias") "" -}}
+# Authorization Server metadata alias (RFC 8414 / OIDC discovery).
+#
+# The Keycloak issuer is PATH-BASED (https://host/<base>/realms/<realm>). MCP OAuth
+# clients that don't chase the RFC 9728 -> 8414 discovery to the realm path (Codex,
+# OMP, mcp-remote) drop the path and fetch the AS metadata at the host ROOT
+# (/.well-known/oauth-authorization-server) or the RFC-8414 path-inserted location
+# (/.well-known/oauth-authorization-server/<issuer-path>). Keycloak serves it ONLY
+# under the realm path, so both 404 -> the client derives a wrong token_endpoint and
+# the token POST 404s. This aliases both forms to the realm's metadata.
+#
+# NOTE: it lands in the KEYCLOAK namespace ({{ $a.namespace }}) because nginx Ingress
+# backends must be in the same namespace as the Ingress; the release ServiceAccount
+# needs Ingress rights there. nginx only. Native clients (Claude Code) don't need this.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-oauth-as-alias
+  namespace: {{ required "mcpAuth.authServerMetadataAlias.namespace is required" $a.namespace }}
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: {{ $issuerPath }}/.well-known/$1
+    nginx.ingress.kubernetes.io/proxy-buffer-size: 16k
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "4"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /\.well-known/(oauth-authorization-server|openid-configuration)({{ $issuerPath }})?
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: {{ required "mcpAuth.authServerMetadataAlias.service is required" $a.service }}
+                port:
+                  {{- if kindIs "float64" $a.servicePort }}
+                  number: {{ $a.servicePort }}
+                  {{- else }}
+                  name: {{ $a.servicePort | default "http" }}
+                  {{- end }}
+  {{- if $a.tlsSecretName }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ $a.tlsSecretName }}
+  {{- end }}
+{{- end }}

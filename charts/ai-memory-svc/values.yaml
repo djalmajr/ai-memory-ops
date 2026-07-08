@@ -336,6 +336,18 @@ mcpAuth:
     resource: ""                                    # e.g. "https://platform.example.com/wiki/mcp"
     metadataUrl: ""                                 # e.g. "https://platform.example.com/wiki/.well-known/oauth-protected-resource"
     scopes: "mcp:read mcp:write"
+  # Authorization Server metadata alias (RFC 8414 / OIDC discovery). Aliases the AS
+  # metadata at the host ROOT and the RFC-8414 path-inserted location to the Keycloak
+  # realm, so MCP OAuth clients that drop the path-based issuer (Codex, OMP, mcp-remote)
+  # can discover it. Deploys an Ingress INTO the Keycloak namespace (nginx backends must
+  # be same-namespace); the release SA needs Ingress rights there. nginx only. The realm
+  # path is derived from mcpAuth.oidc.issuer. See gotcha mcp-oauth-path-based-issuer.
+  authServerMetadataAlias:
+    enabled: false
+    namespace: ""            # Keycloak's namespace (where this Ingress lands)
+    service: ""              # Keycloak HTTP service name in that namespace
+    servicePort: http        # port name (e.g. "http") or number (e.g. 80)
+    tlsSecretName: ""         # TLS secret for ingress.host, IN the keycloak namespace
   # Lifecycle-hook token — static bearer accepted ONLY on /hook and /handoff
   # (agent hooks are headless and cannot run an interactive OAuth flow). The
   # token itself lives in the external Secret <release>-secrets under the
