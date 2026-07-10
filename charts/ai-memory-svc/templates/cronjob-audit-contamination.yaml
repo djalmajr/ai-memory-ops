@@ -1,0 +1,69 @@
+{{- /*
+Isolated CronJob for the server-side contamination audit. Reaches the engine
+over Service DNS and calls the read-only /admin/audit-contamination endpoint
+(in-cluster admin router is unauthenticated; auth is at the edge). HTTP only —
+it never mounts the RWO data PVC. The Job FAILS on findings (see the script), so
+a failed Job / non-zero exit is the alert. Epic #7 (observability) can later add
+a Prometheus/Loki push, mirroring the capacity cron.
+*/ -}}
+{{- if .Values.monitoring.auditContamination.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-audit-contamination
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.monitoring.auditContamination.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "ai-memory-svc.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: audit-contamination
+        spec:
+          restartPolicy: Never
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: audit-contamination
+              image: "{{ .Values.etl.image.repository }}:{{ .Values.etl.image.tag }}"
+              imagePullPolicy: {{ .Values.etl.image.pullPolicy }}
+              command:
+                - /bin/bash
+                - /usr/local/bin/audit-contamination.sh
+              env:
+                - name: AI_MEMORY_ADMIN_URL
+                  value: "http://{{ include "ai-memory-svc.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.aiMemory.port }}"
+                - name: AUDIT_WORKSPACE
+                  value: {{ .Values.monitoring.auditContamination.workspace | quote }}
+                - name: AUDIT_PROJECT
+                  value: {{ .Values.monitoring.auditContamination.project | quote }}
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              volumeMounts:
+                - name: audit-script
+                  mountPath: /usr/local/bin/audit-contamination.sh
+                  subPath: audit-contamination.sh
+                  readOnly: true
+          volumes:
+            - name: audit-script
+              configMap:
+                name: {{ include "ai-memory-svc.fullname" . }}-audit-contamination
+                defaultMode: 0755
+                items:
+                  - key: audit-contamination.sh
+                    path: audit-contamination.sh
+{{- end }}

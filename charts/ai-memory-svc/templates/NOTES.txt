@@ -8,6 +8,7 @@ Topology:
 - oauth2-proxy: {{ $fullName }}-oauth2 (OIDC login for browser — /web, /api/v1)
 {{- end }}
 - ETL: {{ if .Values.etl.enabled }}CronJob {{ $fullName }}-etl ({{ if .Values.etl.suspend }}suspended — on-demand only{{ else }}schedule "{{ .Values.etl.schedule }}"{{ end }}){{ else }}disabled{{ end }}
+- Audit (contamination): {{ if .Values.monitoring.auditContamination.enabled }}CronJob {{ $fullName }}-audit-contamination (schedule "{{ .Values.monitoring.auditContamination.schedule }}" — a FAILED Job means contamination was found, that is the alert){{ else }}disabled{{ end }}
 - RWO PVC: {{ include "ai-memory-svc.dbPvcName" . }} (ai-memory data dir: wiki/ + db/memory.sqlite)
 - ConfigMap: {{ include "ai-memory-svc.configMapName" . }}
 - Secret (expected): {{ include "ai-memory-svc.secretName" . }}

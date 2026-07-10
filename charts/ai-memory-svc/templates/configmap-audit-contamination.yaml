@@ -1,0 +1,37 @@
+{{- /*
+ConfigMap with the audit-contamination.sh script mounted on the audit CronJob.
+Pattern: ConfigMap-mounted-script (avoids rebuilding the ETL image). The script
+GETs the read-only /admin/audit-contamination endpoint (SQL-only, no LLM) and
+FAILS the Job when the summary counts are non-zero, so a failed Job is the alert.
+NOTE: the `ai-memory audit-contamination` CLI exits 0 even with findings, so the
+cron must parse the counts (below) rather than trust an exit code.
+*/ -}}
+{{- if .Values.monitoring.auditContamination.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-audit-contamination
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+data:
+  audit-contamination.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    URL="${AI_MEMORY_ADMIN_URL:?AI_MEMORY_ADMIN_URL is required}/admin/audit-contamination"
+    # Both scope params required together; empty scope audits every project.
+    if [[ -n "${AUDIT_WORKSPACE:-}" && -n "${AUDIT_PROJECT:-}" ]]; then
+      URL="${URL}?workspace=${AUDIT_WORKSPACE}&project=${AUDIT_PROJECT}"
+    fi
+    REPORT=$(curl -fsS "$URL")
+    echo "$REPORT"
+    # CHECK A only: a session whose cwd resolves to a different project. The old
+    # CHECK B (observation_session_drift / observations_drifted) was removed from
+    # the engine — cross-project observations are legitimate per-cwd work, not
+    # contamination — so the audit summary no longer carries that count.
+    S=$(echo "$REPORT" | jq '.summary.sessions_misbucketed')
+    if [[ "$S" -ne 0 ]]; then
+      echo "CONTAMINATION: sessions_misbucketed=$S" >&2
+      exit 1
+    fi
+    echo "clean"
+{{- end }}

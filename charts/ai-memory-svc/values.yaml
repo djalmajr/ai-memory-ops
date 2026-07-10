@@ -78,6 +78,17 @@ monitoring:
       limits:
         cpu: 200m
         memory: 64Mi
+  # Server-side, SQL-only contamination audit (GET /admin/audit-contamination,
+  # no LLM — safe for recurring runs, unlike the multi-agent workflow that hits
+  # provider rate limits). Opt-in. The Job FAILS ON PURPOSE when it finds
+  # misbucketed sessions (CHECK A: a session whose cwd resolves to a different
+  # project), so a failed Job is the alert.
+  auditContamination:
+    enabled: false
+    schedule: "0 */12 * * *"
+    # Empty scope audits every project; set BOTH to pin a single bucket.
+    workspace: ""
+    project: ""
 
 # ----------------------------------------------------------------------------
 # ai-memory — single server
