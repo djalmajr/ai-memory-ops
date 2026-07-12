@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -262,5 +264,82 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func getHandler(t *testing.T, h http.HandlerFunc) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// The readiness probe trips ONLY on a live-and-stale push-failure backlog —
+// never on a blip, and never on a legitimately idle mirror.
+func TestHealthzStaleReturns503(t *testing.T) {
+	m := newMirror()
+	// Comfortably above the 1s truncation floor of the unix-seconds timestamp
+	// (production uses 15m, so second-granularity is irrelevant there).
+	m.staleFailThreshold = 10 * time.Second
+
+	// Fresh: no failures → 200.
+	if code, _ := getHandler(t, m.handleHealth); code != http.StatusOK {
+		t.Fatalf("fresh mirror: want 200, got %d", code)
+	}
+
+	// Live failure backlog that has gone stale → 503.
+	m.consecPushFail.Store(2)
+	m.lastPushOKUnix.Store(time.Now().Add(-time.Hour).Unix())
+	if code, body := getHandler(t, m.handleHealth); code != http.StatusServiceUnavailable {
+		t.Fatalf("stale failing mirror: want 503, got %d (%s)", code, body)
+	}
+
+	// Idle but old (zero failures) → still 200: a quiet mirror must not trip.
+	m.consecPushFail.Store(0)
+	if code, _ := getHandler(t, m.handleHealth); code != http.StatusOK {
+		t.Fatalf("idle-but-old mirror: want 200, got %d", code)
+	}
+
+	// Failing but within the threshold → 200 (transient-blip tolerance).
+	m.consecPushFail.Store(1)
+	m.lastPushOKUnix.Store(time.Now().Unix())
+	if code, _ := getHandler(t, m.handleHealth); code != http.StatusOK {
+		t.Fatalf("recent failure within threshold: want 200, got %d", code)
+	}
+}
+
+// Liveness stays 200 through any staleness so a remote outage never triggers
+// a k8s restart loop (which wouldn't fix an unreachable remote anyway).
+func TestLivezAlwaysOKEvenWhenStale(t *testing.T) {
+	m := newMirror()
+	m.staleFailThreshold = time.Millisecond
+	m.consecPushFail.Store(99)
+	m.lastPushOKUnix.Store(time.Now().Add(-24 * time.Hour).Unix())
+	if code, _ := getHandler(t, handleLivez); code != http.StatusOK {
+		t.Fatalf("livez must be 200 regardless of staleness, got %d", code)
+	}
+}
+
+func TestMetricsExposesHealthState(t *testing.T) {
+	m := newMirror()
+	m.lastPushOKUnix.Store(12345)
+	m.consecPushFail.Store(3)
+	m.mu.Lock()
+	m.dirty = true
+	m.mu.Unlock()
+
+	code, body := getHandler(t, m.handleMetrics)
+	if code != http.StatusOK {
+		t.Fatalf("metrics: want 200, got %d", code)
+	}
+	for _, want := range []string{
+		"git_mirror_last_push_ok_timestamp_seconds 12345",
+		"git_mirror_consecutive_push_failures 3",
+		"git_mirror_dirty 1",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics body missing %q\n---\n%s", want, body)
+		}
 	}
 }

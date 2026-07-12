@@ -70,6 +70,8 @@ spec:
               value: {{ .Values.webhooks.gitMirror.git.userEmail | default "git-mirror@ai-memory.local" | quote }}
             - name: PUSH_DEBOUNCE
               value: {{ .Values.webhooks.gitMirror.pushDebounce | default "10s" | quote }}
+            - name: STALE_FAIL_THRESHOLD
+              value: {{ .Values.webhooks.gitMirror.staleFailThreshold | default "15m" | quote }}
             - name: WORK_DIR
               value: "/work/repo"
             {{- if eq (.Values.webhooks.gitMirror.auth | default "ssh") "ssh" }}
@@ -89,18 +91,25 @@ spec:
             {{- end }}
           resources:
             {{- toYaml (.Values.webhooks.gitMirror.resources | default dict) | nindent 12 }}
+          # Liveness uses /livez (always 200 while the process serves HTTP), so
+          # a remote/backup outage never restart-loops the pod — restarting
+          # can't fix an unreachable remote; the staleness alert handles that.
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /livez
               port: http
             initialDelaySeconds: 5
             periodSeconds: 30
+          # Readiness uses /healthz, which flips to 503 only on a live + stale
+          # push-failure backlog (STALE_FAIL_THRESHOLD). failureThreshold is
+          # generous so a transient blip doesn't drop the pod from endpoints.
           readinessProbe:
             httpGet:
               path: /healthz
               port: http
             initialDelaySeconds: 1
-            periodSeconds: 5
+            periodSeconds: 30
+            failureThreshold: 3
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false   # git writes to /work + /tmp

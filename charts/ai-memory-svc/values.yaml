@@ -54,6 +54,30 @@ monitoring:
   capacity:
     enabled: false
     schedule: "0 */6 * * *"
+  # Opt-in single-node alerting: a CronJob (bitnami/kubectl) that checks the
+  # engine pod for OOMKilled/restarts, sustained 429 ingest saturation, memory
+  # pressure, and an external healthcheck, then POSTs to a webhook ONLY when
+  # something is wrong. Nothing is applied until enabled=true. Requires a
+  # pre-created Secret holding ALERT_WEBHOOK_URL (see webhookSecretName).
+  alerts:
+    enabled: false
+    schedule: "*/5 * * * *"
+    since: "6m"                 # log window; keep >= schedule interval
+    saturationThreshold: 5      # "ingest saturated" occurrences that trip a 429 alert
+    memPctThreshold: 80         # % of the container memory limit (needs metrics-server)
+    healthUrl: ""               # default: http://<svc>:<port><basePath>/admin/status
+    webhookSecretName: ""       # Secret with key ALERT_WEBHOOK_URL (required when enabled)
+    image:
+      repository: bitnami/kubectl
+      tag: "1.30"
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 200m
+        memory: 64Mi
 
 # ----------------------------------------------------------------------------
 # ai-memory — single server
@@ -258,6 +282,10 @@ webhooks:
     # How long to wait for further commits before issuing `git push`.
     # Lower = fresher backup; higher = fewer pushes / less remote chatter.
     pushDebounce: 10s
+    # Readiness (/healthz) reports 503 once there is a LIVE push-failure
+    # backlog whose last success is older than this. An idle mirror (no
+    # writes) never trips it. Also the threshold the staleness alert keys off.
+    staleFailThreshold: 15m
     # Name of the pre-existing Secret with the SSH deploy key. Default
     # follows the chart fullname pattern; override if you create the
     # secret with a custom name.
