@@ -1,0 +1,47 @@
+{{- /*
+Minimal namespaced RBAC for the single-node alerting CronJob: read-only on
+pods/events/logs (+ metrics.k8s.io when metrics-server is present). No
+cluster-wide grants, no write verbs — nothing to escalate.
+*/ -}}
+{{- if .Values.monitoring.alerts.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-alerts
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-alerts
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Optional: only used when metrics-server is installed. The memory probe
+  # degrades to a no-op if this returns nothing.
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-alerts
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "ai-memory-svc.fullname" . }}-alerts
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ai-memory-svc.fullname" . }}-alerts
+    namespace: {{ .Release.Namespace }}
+{{- end }}

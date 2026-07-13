@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -64,21 +65,35 @@ type mirror struct {
 	gitEmail  string
 	pushDelay time.Duration
 
+	// staleFailThreshold: /healthz flips to 503 once a *live* push-failure
+	// backlog is at least this old. Idle time alone (no failures) never trips.
+	staleFailThreshold time.Duration
+
 	mu        sync.Mutex // serializes git ops on workDir
 	dirty     bool       // pending commits not yet pushed
 	dirtyCond *sync.Cond
+
+	// Health signals, written by pushLoop/handleSync and read lock-free by
+	// the /healthz + /metrics handlers (so a long-held push mutex can never
+	// block a probe or a scrape).
+	lastPushOKUnix atomic.Int64 // unix seconds of the last successful push
+	consecPushFail atomic.Int64 // consecutive push failures since last success
 }
 
 func newMirror() *mirror {
 	m := &mirror{
-		workDir:   envOr("WORK_DIR", "/work/repo"),
-		repoURL:   os.Getenv("REPO_URL"),
-		branch:    envOr("REPO_BRANCH", "main"),
-		gitUser:   envOr("GIT_USER", "ai-memory git-mirror"),
-		gitEmail:  envOr("GIT_EMAIL", "git-mirror@ai-memory.local"),
-		pushDelay: parseDuration(os.Getenv("PUSH_DEBOUNCE"), 10*time.Second),
+		workDir:            envOr("WORK_DIR", "/work/repo"),
+		repoURL:            os.Getenv("REPO_URL"),
+		branch:             envOr("REPO_BRANCH", "main"),
+		gitUser:            envOr("GIT_USER", "ai-memory git-mirror"),
+		gitEmail:           envOr("GIT_EMAIL", "git-mirror@ai-memory.local"),
+		pushDelay:          parseDuration(os.Getenv("PUSH_DEBOUNCE"), 10*time.Second),
+		staleFailThreshold: parseDuration(os.Getenv("STALE_FAIL_THRESHOLD"), 15*time.Minute),
 	}
 	m.dirtyCond = sync.NewCond(&m.mu)
+	// Seed "last push ok" to now so a freshly-started mirror never reports
+	// stale before it has had a chance to push.
+	m.lastPushOKUnix.Store(time.Now().Unix())
 	return m
 }
 
@@ -447,6 +462,7 @@ func (m *mirror) pushLoop(ctx context.Context) {
 		}
 		m.mu.Unlock()
 		if err != nil {
+			m.consecPushFail.Add(1)
 			slog.Error("push failed; will retry on next signal", "err", err)
 			// Mark dirty again so the next write retriggers.
 			m.mu.Lock()
@@ -464,6 +480,8 @@ func (m *mirror) pushLoop(ctx context.Context) {
 			m.mu.Unlock()
 			continue
 		}
+		m.lastPushOKUnix.Store(time.Now().Unix())
+		m.consecPushFail.Store(0)
 		slog.Info("push ok", "branch", m.branch)
 	}
 }
@@ -504,9 +522,58 @@ func (m *mirror) handleSync(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func handleHealth(w http.ResponseWriter, _ *http.Request) {
+// handleHealth is the staleness-aware readiness probe. It reports 503 only
+// when there is a LIVE push-failure backlog (consecPushFail > 0) that has also
+// gone stale (last success older than staleFailThreshold). An idle mirror with
+// no writes never increments consecPushFail, so a quiet period never trips it —
+// this targets the "backup silently wedged" mode (the 9-day index.lock outage)
+// without flapping on transient blips or legitimate idleness.
+func (m *mirror) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	fails := m.consecPushFail.Load()
+	lastOK := time.Unix(m.lastPushOKUnix.Load(), 0)
+	age := time.Since(lastOK)
+	if fails > 0 && age > m.staleFailThreshold {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = fmt.Fprintf(w, "stale: %d consecutive push failures, last ok %s ago\n",
+			fails, age.Round(time.Second))
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
+}
+
+// handleLivez is the liveness probe: 200 as long as the process serves HTTP.
+// It never reflects push staleness, so a remote outage cannot cause k8s to
+// restart-loop the pod (restarting doesn't fix an unreachable remote — the
+// staleness ALERT does). Restarts stay reserved for a wedged process.
+func handleLivez(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok\n"))
+}
+
+// handleMetrics exposes the backup health signals in Prometheus text format
+// (hand-written; the image pulls in no metrics dependency). An external rule
+// can alert on `time() - git_mirror_last_push_ok_timestamp_seconds` or on a
+// rising `git_mirror_consecutive_push_failures`.
+func (m *mirror) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	m.mu.Lock()
+	dirty := 0
+	if m.dirty {
+		dirty = 1
+	}
+	m.mu.Unlock()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	_, _ = fmt.Fprintf(w,
+		"# HELP git_mirror_last_push_ok_timestamp_seconds Unix time of the last successful push.\n"+
+			"# TYPE git_mirror_last_push_ok_timestamp_seconds gauge\n"+
+			"git_mirror_last_push_ok_timestamp_seconds %d\n"+
+			"# HELP git_mirror_consecutive_push_failures Consecutive push failures since the last success.\n"+
+			"# TYPE git_mirror_consecutive_push_failures gauge\n"+
+			"git_mirror_consecutive_push_failures %d\n"+
+			"# HELP git_mirror_dirty Whether commits are pending push (1) or not (0).\n"+
+			"# TYPE git_mirror_dirty gauge\n"+
+			"git_mirror_dirty %d\n",
+		m.lastPushOKUnix.Load(), m.consecPushFail.Load(), dirty)
 }
 
 func setupLogger() {
@@ -542,7 +609,9 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /sync", m.handleSync)
-	mux.HandleFunc("GET /healthz", handleHealth)
+	mux.HandleFunc("GET /healthz", m.handleHealth)
+	mux.HandleFunc("GET /livez", handleLivez)
+	mux.HandleFunc("GET /metrics", m.handleMetrics)
 
 	srv := &http.Server{
 		Addr:              addr,

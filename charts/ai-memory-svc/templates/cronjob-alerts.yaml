@@ -1,0 +1,87 @@
+{{- /*
+Opt-in single-node alerting CronJob. Reads the engine pod's health via the
+k8s API + a healthcheck and POSTs to a webhook only on a problem. Runs as its
+own pod (bitnami/kubectl, not the engine image); Forbid + backoffLimit 0 keep
+runs from stacking. Nothing renders unless monitoring.alerts.enabled=true.
+*/ -}}
+{{- if .Values.monitoring.alerts.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-alerts
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.monitoring.alerts.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "ai-memory-svc.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: alerts
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "ai-memory-svc.fullname" . }}-alerts
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: alert-report
+              image: "{{ .Values.monitoring.alerts.image.repository }}:{{ .Values.monitoring.alerts.image.tag }}"
+              imagePullPolicy: {{ .Values.monitoring.alerts.image.pullPolicy }}
+              command:
+                - /bin/bash
+                - /usr/local/bin/alert-report.sh
+              env:
+                - name: NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: POD_SELECTOR
+                  value: "app.kubernetes.io/name={{ include "ai-memory-svc.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=main"
+                - name: SINCE
+                  value: {{ .Values.monitoring.alerts.since | default "6m" | quote }}
+                - name: SATURATION_THRESHOLD
+                  value: {{ .Values.monitoring.alerts.saturationThreshold | default 5 | quote }}
+                - name: MEM_PCT_THRESHOLD
+                  value: {{ .Values.monitoring.alerts.memPctThreshold | default 80 | quote }}
+                - name: MEM_LIMIT
+                  value: {{ (((.Values.aiMemory).resources).limits).memory | default "" | quote }}
+                - name: HEALTH_URL
+                  value: {{ .Values.monitoring.alerts.healthUrl | default (printf "http://%s:%v/admin/status" (include "ai-memory-svc.fullname" .) .Values.aiMemory.port) | quote }}
+                - name: STATE_DIR
+                  value: "/data/monitoring"
+                {{- if .Values.monitoring.alerts.webhookSecretName }}
+                - name: ALERT_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.monitoring.alerts.webhookSecretName }}
+                      key: ALERT_WEBHOOK_URL
+                {{- end }}
+              resources:
+                {{- toYaml (.Values.monitoring.alerts.resources | default dict) | nindent 16 }}
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                - name: alert-script
+                  mountPath: /usr/local/bin/alert-report.sh
+                  subPath: alert-report.sh
+                  readOnly: true
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: {{ include "ai-memory-svc.dbPvcName" . }}
+            - name: alert-script
+              configMap:
+                name: {{ include "ai-memory-svc.fullname" . }}-alert-report
+                defaultMode: 0755
+                items:
+                  - key: alert-report.sh
+                    path: alert-report.sh
+{{- end }}

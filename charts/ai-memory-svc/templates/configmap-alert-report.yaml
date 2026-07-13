@@ -1,0 +1,111 @@
+{{- /*
+Inline alert script for the single-node alerting CronJob (see
+cronjob-alerts.yaml). Kept in a ConfigMap so it ships without an image
+rebuild and is fully visible in the PR / `helm get manifest`.
+*/ -}}
+{{- if .Values.monitoring.alerts.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ai-memory-svc.fullname" . }}-alert-report
+  labels:
+    {{- include "ai-memory-svc.labels" . | nindent 4 }}
+data:
+  alert-report.sh: |
+    #!/usr/bin/env bash
+    # Single-node health check → webhook. Emits an alert ONLY when something
+    # is wrong (silent exit 0 otherwise). Every probe degrades gracefully so a
+    # missing metrics-server or a transient kubectl error never crashes the run.
+    set -euo pipefail
+
+    NS="${NAMESPACE:?NAMESPACE required}"
+    SELECTOR="${POD_SELECTOR:?POD_SELECTOR required}"
+    SINCE="${SINCE:-6m}"
+    SAT_THRESHOLD="${SATURATION_THRESHOLD:-5}"
+    MEM_PCT_THRESHOLD="${MEM_PCT_THRESHOLD:-80}"
+    MEM_LIMIT="${MEM_LIMIT:-}"
+    HEALTH_URL="${HEALTH_URL:-}"
+    WEBHOOK_URL="${ALERT_WEBHOOK_URL:-}"
+    STATE_DIR="${STATE_DIR:-/data/monitoring}"
+
+    num() { printf '%s' "${1:-}" | tr -dc '0-9'; }
+    alerts=()
+
+    pod="$(kubectl -n "$NS" get pods -l "$SELECTOR" \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+
+    if [ -z "$pod" ]; then
+      alerts+=("no engine pod matches selector '$SELECTOR'")
+    else
+      # --- OOMKilled + restart-count drift -------------------------------
+      reason="$(kubectl -n "$NS" get pod "$pod" \
+        -o jsonpath='{.status.containerStatuses[?(@.name=="ai-memory")].lastState.terminated.reason}' \
+        2>/dev/null || true)"
+      if [ "$reason" = "OOMKilled" ]; then
+        alerts+=("engine last terminated OOMKilled")
+      fi
+
+      restarts="$(num "$(kubectl -n "$NS" get pod "$pod" \
+        -o jsonpath='{.status.containerStatuses[?(@.name=="ai-memory")].restartCount}' \
+        2>/dev/null || true)")"
+      restarts="${restarts:-0}"
+      mkdir -p "$STATE_DIR" 2>/dev/null || true
+      prev_file="$STATE_DIR/last-restart-count"
+      prev="$(num "$(cat "$prev_file" 2>/dev/null || true)")"
+      prev="${prev:-0}"
+      if [ "$restarts" -gt "$prev" ]; then
+        alerts+=("engine restartCount rose ${prev} -> ${restarts}")
+      fi
+      printf '%s' "$restarts" > "$prev_file" 2>/dev/null || true
+
+      # --- Sustained 429 ingest saturation -------------------------------
+      sat="$(num "$(kubectl -n "$NS" logs "$pod" -c ai-memory --since="$SINCE" 2>/dev/null \
+        | grep -c 'ingest saturated' || true)")"
+      sat="${sat:-0}"
+      if [ "$sat" -ge "$SAT_THRESHOLD" ]; then
+        alerts+=("ingest saturated ${sat}x in the last ${SINCE} (sustained 429s)")
+      fi
+
+      # --- Memory pressure (best-effort; needs metrics-server) -----------
+      lim_mi=0
+      case "$MEM_LIMIT" in
+        *Gi) lim_mi=$(( $(num "$MEM_LIMIT") * 1024 )) ;;
+        *Mi) lim_mi=$(num "$MEM_LIMIT") ;;
+      esac
+      top_line="$(kubectl -n "$NS" top pod "$pod" --no-headers 2>/dev/null || true)"
+      if [ -n "$top_line" ] && [ "${lim_mi:-0}" -gt 0 ]; then
+        mem_mi="$(num "$(printf '%s' "$top_line" | awk '{print $3}')")"
+        if [ -n "$mem_mi" ] && [ "$mem_mi" -gt 0 ]; then
+          pct=$(( mem_mi * 100 / lim_mi ))
+          if [ "$pct" -ge "$MEM_PCT_THRESHOLD" ]; then
+            alerts+=("engine memory ${pct}% of limit (${mem_mi}Mi/${lim_mi}Mi)")
+          fi
+        fi
+      fi
+    fi
+
+    # --- External healthcheck --------------------------------------------
+    if [ -n "$HEALTH_URL" ]; then
+      code="$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$HEALTH_URL" 2>/dev/null || echo 000)"
+      case "$code" in
+        2*) ;;
+        *) alerts+=("healthcheck $HEALTH_URL returned HTTP $code") ;;
+      esac
+    fi
+
+    if [ "${#alerts[@]}" -eq 0 ]; then
+      echo "ok: no alerts"
+      exit 0
+    fi
+
+    printf 'ALERT: %s\n' "${alerts[@]}"
+
+    if [ -n "$WEBHOOK_URL" ]; then
+      msg="ai-memory alert ($NS): $(printf '%s; ' "${alerts[@]}")"
+      esc="$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')"
+      if ! curl -s -m 10 -X POST -H 'Content-Type: application/json' \
+        -d "{\"text\":\"${esc}\"}" "$WEBHOOK_URL" >/dev/null 2>&1; then
+        echo "warn: webhook POST failed"
+      fi
+    fi
+{{- end }}
