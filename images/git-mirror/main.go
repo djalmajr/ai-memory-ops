@@ -78,6 +78,15 @@ type mirror struct {
 	// block a probe or a scrape).
 	lastPushOKUnix atomic.Int64 // unix seconds of the last successful push
 	consecPushFail atomic.Int64 // consecutive push failures since last success
+
+	// Reconciliation: periodically prune backup project dirs whose project no
+	// longer exists in the engine (orphans left by a purge that bypassed the
+	// admission chain). Disabled when reconcileInterval == 0 or engineURL == "".
+	reconcileInterval time.Duration
+	engineURL         string // e.g. http://memory-v2-wiki-service:49374
+	engineToken       string // bearer for the engine's /admin
+	engineHost        string // Host header (engine allowedHosts gate)
+	httpc             *http.Client
 }
 
 func newMirror() *mirror {
@@ -94,6 +103,14 @@ func newMirror() *mirror {
 	// Seed "last push ok" to now so a freshly-started mirror never reports
 	// stale before it has had a chance to push.
 	m.lastPushOKUnix.Store(time.Now().Unix())
+	// Reconciliation config (opt-in: needs both a non-zero interval and an
+	// engine URL). ENGINE_HOST_HEADER defaults to "localhost" so the request
+	// clears the engine's allowedHosts gate when hit via a Service DNS name.
+	m.reconcileInterval = parseDuration(os.Getenv("RECONCILE_INTERVAL"), 0)
+	m.engineURL = strings.TrimRight(os.Getenv("ENGINE_URL"), "/")
+	m.engineToken = os.Getenv("ENGINE_AUTH_TOKEN")
+	m.engineHost = envOr("ENGINE_HOST_HEADER", "localhost")
+	m.httpc = &http.Client{Timeout: 20 * time.Second}
 	return m
 }
 
@@ -576,6 +593,157 @@ func (m *mirror) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		m.lastPushOKUnix.Load(), m.consecPushFail.Load(), dirty)
 }
 
+// adminProject is one entry of the engine's `GET /admin/projects` response.
+type adminProject struct {
+	Workspace string `json:"workspace_name"`
+	Project   string `json:"project_name"`
+}
+
+// fetchLiveProjects asks the engine for the authoritative (workspace, project)
+// inventory and returns the set of "workspace/project" keys. Any error
+// (unreachable, non-2xx, decode failure) is surfaced so the caller FAILS SAFE
+// and prunes nothing.
+func (m *mirror) fetchLiveProjects(ctx context.Context) (map[string]bool, error) {
+	if m.engineURL == "" {
+		return nil, fmt.Errorf("ENGINE_URL not set")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.engineURL+"/admin/projects", nil)
+	if err != nil {
+		return nil, err
+	}
+	if m.engineToken != "" {
+		req.Header.Set("Authorization", "Bearer "+m.engineToken)
+	}
+	if m.engineHost != "" {
+		req.Host = m.engineHost
+	}
+	resp, err := m.httpc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("engine /admin/projects returned %s", resp.Status)
+	}
+	var payload struct {
+		Projects []adminProject `json:"projects"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&payload); err != nil {
+		return nil, err
+	}
+	live := make(map[string]bool, len(payload.Projects))
+	for _, p := range payload.Projects {
+		if p.Workspace == "" || p.Project == "" {
+			continue
+		}
+		live[p.Workspace+"/"+p.Project] = true
+	}
+	return live, nil
+}
+
+// findOrphans returns the "workspace/project" keys that exist as
+// wiki/<ws>/<proj> directories on disk but are ABSENT from `live`. Only
+// two-level directories directly under wiki/ are considered; top-level files
+// (e.g. a workspace-level _meta.md) are ignored. Pure function for testability.
+func findOrphans(wikiRoot string, live map[string]bool) ([]string, error) {
+	wsEntries, err := os.ReadDir(wikiRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var orphans []string
+	for _, ws := range wsEntries {
+		if !ws.IsDir() {
+			continue
+		}
+		projEntries, err := os.ReadDir(filepath.Join(wikiRoot, ws.Name()))
+		if err != nil {
+			return nil, err
+		}
+		for _, pr := range projEntries {
+			if !pr.IsDir() {
+				continue
+			}
+			key := ws.Name() + "/" + pr.Name()
+			if !live[key] {
+				orphans = append(orphans, key)
+			}
+		}
+	}
+	return orphans, nil
+}
+
+// reconcile prunes backup project directories the engine no longer knows about
+// (orphans from purges that bypassed the admission chain). It is FAIL-SAFE: if
+// the engine can't be reached OR returns an empty inventory, it prunes NOTHING
+// — a transient engine error or a freshly-restored/misconfigured engine must
+// never cause the reconciler to wipe the backup.
+func (m *mirror) reconcile(ctx context.Context) error {
+	live, err := m.fetchLiveProjects(ctx)
+	if err != nil {
+		return fmt.Errorf("fetch live projects: %w", err)
+	}
+	if len(live) == 0 {
+		slog.Warn("reconcile: engine returned zero projects; skipping prune (fail-safe)")
+		return nil
+	}
+	orphans, err := findOrphans(filepath.Join(m.workDir, "wiki"), live)
+	if err != nil {
+		return fmt.Errorf("scan wiki: %w", err)
+	}
+	if len(orphans) == 0 {
+		slog.Debug("reconcile: no orphans", "live_projects", len(live))
+		return nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clearStaleIndexLock()
+	removed := 0
+	for _, key := range orphans {
+		rel := filepath.Join("wiki", key)
+		if _, err := safeJoin(m.workDir, rel); err != nil {
+			slog.Warn("reconcile: skipping unsafe path", "key", key, "err", err)
+			continue
+		}
+		if err := m.run(ctx, "git", "rm", "-rf", "--ignore-unmatch", rel); err != nil {
+			slog.Error("reconcile: git rm failed", "key", key, "err", err)
+			continue
+		}
+		removed++
+		slog.Info("reconcile: pruned orphan project from backup", "key", key)
+	}
+	if removed == 0 {
+		return nil
+	}
+	return m.commitDirty(ctx, fmt.Sprintf("reconcile: prune %d orphan project(s) absent from the engine", removed))
+}
+
+// reconcileLoop runs reconcile() shortly after boot and then every
+// reconcileInterval until ctx is cancelled.
+func (m *mirror) reconcileLoop(ctx context.Context) {
+	// Let the bootstrap clone settle before the first pass.
+	select {
+	case <-time.After(30 * time.Second):
+	case <-ctx.Done():
+		return
+	}
+	t := time.NewTicker(m.reconcileInterval)
+	defer t.Stop()
+	for {
+		if err := m.reconcile(ctx); err != nil {
+			slog.Warn("reconcile pass failed", "err", err)
+		}
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func setupLogger() {
 	level := slog.LevelInfo
 	switch os.Getenv("LOG_LEVEL") {
@@ -606,6 +774,12 @@ func main() {
 	}
 
 	go m.pushLoop(ctx)
+
+	if m.reconcileInterval > 0 && m.engineURL != "" {
+		slog.Info("git-mirror reconcile enabled",
+			"interval", m.reconcileInterval, "engine", m.engineURL)
+		go m.reconcileLoop(ctx)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /sync", m.handleSync)

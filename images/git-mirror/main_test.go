@@ -343,3 +343,61 @@ func TestMetricsExposesHealthState(t *testing.T) {
 		}
 	}
 }
+
+func TestFindOrphansIdentifiesDirsAbsentFromLive(t *testing.T) {
+	root := t.TempDir()
+	for _, p := range []string{"djalmajr/ai-memory", "djalmajr/grok-e2e-test", "default/scratch"} {
+		if err := os.MkdirAll(filepath.Join(root, p, "decisions"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A workspace-level file must be ignored, not treated as a project dir.
+	if err := os.WriteFile(filepath.Join(root, "djalmajr", "_meta.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	live := map[string]bool{"djalmajr/ai-memory": true, "default/scratch": true}
+	orphans, err := findOrphans(root, live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orphans) != 1 || orphans[0] != "djalmajr/grok-e2e-test" {
+		t.Fatalf("want [djalmajr/grok-e2e-test], got %v", orphans)
+	}
+}
+
+func TestFindOrphansMissingRootIsNoError(t *testing.T) {
+	orphans, err := findOrphans(filepath.Join(t.TempDir(), "nope"), map[string]bool{})
+	if err != nil || orphans != nil {
+		t.Fatalf("missing wiki root must be (nil,nil), got (%v,%v)", orphans, err)
+	}
+}
+
+func TestFetchLiveProjectsParsesAndAuths(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/admin/projects" || r.Header.Get("Authorization") != "Bearer tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"projects":[{"workspace_name":"djalmajr","project_name":"ai-memory","page_count":3},{"workspace_name":"default","project_name":"scratch"}]}`))
+	}))
+	defer srv.Close()
+	m := &mirror{engineURL: srv.URL, engineToken: "tok", httpc: srv.Client()}
+	live, err := m.fetchLiveProjects(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 2 || !live["djalmajr/ai-memory"] || !live["default/scratch"] {
+		t.Fatalf("unexpected live set: %v", live)
+	}
+}
+
+func TestFetchLiveProjectsErrorsOnNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	m := &mirror{engineURL: srv.URL, httpc: srv.Client()}
+	if _, err := m.fetchLiveProjects(context.Background()); err == nil {
+		t.Fatal("want error on non-200 (fail-safe: caller prunes nothing)")
+	}
+}

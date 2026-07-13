@@ -286,6 +286,16 @@ webhooks:
     # backlog whose last success is older than this. An idle mirror (no
     # writes) never trips it. Also the threshold the staleness alert keys off.
     staleFailThreshold: 15m
+    # Backup reconciliation (opt-in): every reconcileInterval, ask the engine
+    # for its authoritative project list (GET /admin/projects) and prune any
+    # backup `wiki/<ws>/<proj>` dir whose project no longer exists — orphans
+    # left by a purge that bypassed the admission chain (a CLI --data-dir
+    # purge, a direct DB op). FAIL-SAFE: a failed/empty engine response prunes
+    # nothing. Requires BOTH reconcileInterval AND engineUrl to activate.
+    reconcileInterval: ""              # e.g. "1h"; empty = disabled
+    engineUrl: ""                      # e.g. http://memory-v2-wiki-service:49374
+    engineHostHeader: localhost        # Host header (engine allowedHosts gate)
+    engineTokenSecret: {}              # { name, key } — Secret with the engine bearer token
     # Name of the pre-existing Secret with the SSH deploy key. Default
     # follows the chart fullname pattern; override if you create the
     # secret with a custom name.
