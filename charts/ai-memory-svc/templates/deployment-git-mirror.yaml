@@ -74,6 +74,24 @@ spec:
               value: {{ .Values.webhooks.gitMirror.staleFailThreshold | default "15m" | quote }}
             - name: WORK_DIR
               value: "/work/repo"
+            {{- if and .Values.webhooks.gitMirror.reconcileInterval .Values.webhooks.gitMirror.engineUrl }}
+            # Backup reconciliation: prune project dirs the engine no longer has
+            # (orphans from purges that bypassed the admission chain). Fail-safe
+            # — a failed/empty engine response prunes nothing.
+            - name: RECONCILE_INTERVAL
+              value: {{ .Values.webhooks.gitMirror.reconcileInterval | quote }}
+            - name: ENGINE_URL
+              value: {{ .Values.webhooks.gitMirror.engineUrl | quote }}
+            - name: ENGINE_HOST_HEADER
+              value: {{ .Values.webhooks.gitMirror.engineHostHeader | default "localhost" | quote }}
+            {{- with .Values.webhooks.gitMirror.engineTokenSecret }}
+            - name: ENGINE_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name }}
+                  key: {{ .key }}
+            {{- end }}
+            {{- end }}
             {{- if eq (.Values.webhooks.gitMirror.auth | default "ssh") "ssh" }}
             # SSH auth: secret mounts id_ed25519 + known_hosts at
             # /etc/git-ssh; GIT_SSH_COMMAND points git at those files.
