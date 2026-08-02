@@ -52,7 +52,11 @@ metadata:
     nginx.ingress.kubernetes.io/auth-url: {{ include "ai-memory-svc.mcpAuthVerifyUrl" $ | quote }}
     # Headers the sidecar emits on 200 and that nginx forwards to the upstream
     # (incl. the swapped static Authorization when UPSTREAM_AUTH_TOKEN is set).
-    nginx.ingress.kubernetes.io/auth-response-headers: "Authorization,X-Auth-Email,X-Auth-Username,X-Auth-Sub,X-Memory-Actor-User,X-Memory-Actor-Sub,X-Memory-Actor-Client,X-Memory-Actor-Agent"
+    # Listing a header here REPLACES any client-supplied value (proxy_set_header
+    # semantics) — which is exactly what X-Memory-Actor-Proxy-Secret needs: the
+    # trust proof for the actor headers (engine ≥ v1.22.0, rung 1b) must only
+    # ever come from mcp-auth, never from the caller.
+    nginx.ingress.kubernetes.io/auth-response-headers: "Authorization,X-Auth-Email,X-Auth-Username,X-Auth-Sub,X-Memory-Actor-User,X-Memory-Actor-Sub,X-Memory-Actor-Client,X-Memory-Actor-Agent,X-Memory-Actor-Proxy-Secret"
     {{- else if eq $r.auth "oauth2" }}
     # Browser auth: oauth2-proxy interactive OIDC login (redirect to Keycloak).
     nginx.ingress.kubernetes.io/auth-url: "http://{{ $oauth2Svc }}.{{ $.Release.Namespace }}.svc.cluster.local:4180/oauth2/auth"
