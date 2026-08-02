@@ -58,7 +58,6 @@ var (
 	upstreamAuthToken string // optional: if set, injects Authorization: Bearer <token> into the upstream after validating the JWT (ai-memory uses a static AI_MEMORY_AUTH_TOKEN and does not validate JWT)
 	hookAuthToken     string // optional: static bearer for the lifecycle-hook routes only (/hook, /handoff) — see HOOK_AUTH_TOKEN above
 	hookAuthUsername  string // optional: username propagated to the actor headers when hookAuthToken matches
-	actorProxySecret  string // optional: echoed as X-Memory-Actor-Proxy-Secret so the engine trusts the actor headers (engine [auth].actor_proxy_secret, rung 1b)
 	httpClient        = &http.Client{Timeout: 10 * time.Second}
 
 	// OAuth protected resource. When oauthEnabled, the
@@ -78,14 +77,6 @@ func main() {
 	upstreamAuthToken = os.Getenv("UPSTREAM_AUTH_TOKEN") // optional: static token injected into the upstream
 	hookAuthToken = os.Getenv("HOOK_AUTH_TOKEN")         // optional: static bearer for /hook and /handoff only
 	hookAuthUsername = os.Getenv("HOOK_AUTH_USERNAME")   // optional: actor username for hook-token requests
-	// Since engine v1.22.0 the X-Memory-Actor-* headers are pure client input
-	// unless the request also carries the shared [auth].actor_proxy_secret —
-	// anything able to reach the port could otherwise claim any identity.
-	// When set, every authenticated response echoes it so Traefik's
-	// authResponseHeaders copies it (REPLACING any client-supplied value)
-	// onto the upstream request. Unset = engine ignores the actor headers and
-	// attributes to root_username, exactly the pre-1.22 behaviour.
-	actorProxySecret = os.Getenv("ACTOR_PROXY_SECRET")
 	refresh := envIntOr("JWKS_REFRESH_SECONDS", 300)
 
 	// OAuth protected resource. Opt-in via OAUTH_ENABLED=true.
@@ -331,12 +322,6 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Auth-Username", hookAuthUsername)
 			w.Header().Set("X-Memory-Actor-User", hookAuthUsername)
 		}
-		// Hook-token requests assert an identity too, so they need the same
-		// trust proof as the JWT path — without it the engine drops the
-		// username above and the hook lands unattributed.
-		if actorProxySecret != "" {
-			w.Header().Set("X-Memory-Actor-Proxy-Secret", actorProxySecret)
-		}
 		if upstreamAuthToken != "" {
 			w.Header().Set("Authorization", "Bearer "+upstreamAuthToken)
 		}
@@ -414,13 +399,6 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 		"elapsed_ms", time.Since(start).Milliseconds(),
 	)
 	propagateIdentityHeaders(w, claims)
-	// The engine only believes the identity headers above when the request
-	// carries the shared proxy secret (engine rung 1b); the validated JWT is
-	// this sidecar's proof that the identity is real, and the secret is how
-	// that proof crosses to the engine.
-	if actorProxySecret != "" {
-		w.Header().Set("X-Memory-Actor-Proxy-Secret", actorProxySecret)
-	}
 	// Injects the static upstream bearer (ai-memory require_bearer) when configured.
 	// Traefik copies this header via authResponseHeaders, swapping the JWT (which ai-memory
 	// does not validate) for the static token it expects. Empty = passes the original Authorization.
@@ -462,6 +440,14 @@ func propagateIdentityHeaders(w http.ResponseWriter, claims jwt.MapClaims) {
 	}
 	if sub != "" {
 		w.Header().Set("X-Memory-Actor-Sub", sub)
+		// The engine (>= v1.22.0) treats issuer+subject as a PAIR — OIDC only
+		// guarantees subject uniqueness within an issuer, and a partial pair
+		// is rejected with 400. `iss` is always present on a validated token
+		// (we verified it against OIDC_ISSUER), so assert it whenever we
+		// assert the subject.
+		if iss, _ := claims["iss"].(string); iss != "" {
+			w.Header().Set("X-Memory-Actor-Issuer", iss)
+		}
 	}
 	azp, _ := claims["azp"].(string)
 	if azp != "" {

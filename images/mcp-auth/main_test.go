@@ -207,25 +207,22 @@ func TestVerifyHookTokenOnHookPath(t *testing.T) {
 	}
 }
 
-// The engine (≥ v1.22.0) discards the X-Memory-Actor-* headers unless the
-// request also carries [auth].actor_proxy_secret. Both authenticated paths
-// must echo it when configured — and neither may emit it when not, because a
-// stale echoed value would just be a wrong secret the engine rejects.
-func TestHookTokenPathEchoesActorProxySecretWhenConfigured(t *testing.T) {
-	setupHookToken(t)
-	actorProxySecret = "proxy-shared-secret"
-	t.Cleanup(func() { actorProxySecret = "" })
-	rec := verifyWith("POST", "/wiki/hook?event=pre-tool-use&agent=claude-code", "hook-secret")
-	if got := rec.Header().Get("X-Memory-Actor-Proxy-Secret"); got != "proxy-shared-secret" {
-		t.Errorf("X-Memory-Actor-Proxy-Secret = %q, want the configured secret", got)
+// The engine (>= v1.22.0) treats issuer+subject as a PAIR — a partial pair is
+// rejected with 400 — so whenever the subject is asserted the issuer must ride
+// along. A token without `iss` never validates, so the pair is always complete.
+func TestPropagateIdentityHeadersAssertsIssuerBesideSubject(t *testing.T) {
+	rec := httptest.NewRecorder()
+	claims := jwt.MapClaims{
+		"preferred_username": "djalmajr",
+		"sub":                "user-sub",
+		"iss":                "https://idp.example/realms/ai-memory",
 	}
-}
-
-func TestHookTokenPathOmitsActorProxySecretWhenUnset(t *testing.T) {
-	setupHookToken(t)
-	rec := verifyWith("POST", "/wiki/hook?event=pre-tool-use&agent=claude-code", "hook-secret")
-	if got := rec.Header().Get("X-Memory-Actor-Proxy-Secret"); got != "" {
-		t.Errorf("X-Memory-Actor-Proxy-Secret = %q, want absent when unconfigured", got)
+	propagateIdentityHeaders(rec, claims)
+	if got := rec.Header().Get("X-Memory-Actor-Sub"); got != "user-sub" {
+		t.Errorf("X-Memory-Actor-Sub = %q, want user-sub", got)
+	}
+	if got := rec.Header().Get("X-Memory-Actor-Issuer"); got != "https://idp.example/realms/ai-memory" {
+		t.Errorf("X-Memory-Actor-Issuer = %q, want the token issuer", got)
 	}
 }
 

@@ -275,14 +275,20 @@ spec:
             {{- end }}
             - name: OAUTH_SCOPES
               value: {{ .Values.mcpAuth.oauth.scopes | default "mcp:read mcp:write offline_access profile" | quote }}
-            # Static token that ai-memory (require_bearer) expects. OPTIONAL: the mcp-auth only
-            # injects Authorization: Bearer <token> into the upstream when this env has a value. If the
-            # Secret does not have AI_MEMORY_AUTH_TOKEN (optional), it stays empty and nothing is injected.
+            # Static token the sidecar injects upstream after validating the caller.
+            # OPTIONAL: absent key = nothing injected. Engine >= v1.22.0 wants this
+            # to be the DEDICATED [auth].actor_proxy_bearer_token — that token is
+            # the switch that makes the engine trust the X-Memory-Actor-* headers,
+            # and it must differ from the root bearer so a proxied request that
+            # names nobody can never fall through as root. Point the key at
+            # AI_MEMORY_AUTH__ACTOR_PROXY_BEARER_TOKEN (which the engine also
+            # imports via envFrom — one key, both sides, no drift); the default
+            # stays on the root token for pre-1.22 compatibility.
             - name: UPSTREAM_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "ai-memory-svc.secretName" . }}
-                  key: AI_MEMORY_AUTH_TOKEN
+                  key: {{ .Values.mcpAuth.upstreamTokenSecretKey | default "AI_MEMORY_AUTH_TOKEN" }}
                   optional: true
             # Lifecycle-hook static bearer (accepted ONLY on /hook and /handoff).
             # OPTIONAL: absent Secret key = feature off (JWT-only behavior).
@@ -296,16 +302,6 @@ spec:
             - name: HOOK_AUTH_USERNAME
               value: {{ . | quote }}
             {{- end }}
-            # Same key the engine reads via envFrom — one secret, two
-            # consumers, so the sidecar's echo and the engine's expectation
-            # can never drift apart. OPTIONAL: absent key = identity headers
-            # stay advisory and the engine ignores them (pre-1.22 behaviour).
-            - name: ACTOR_PROXY_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "ai-memory-svc.secretName" . }}
-                  key: AI_MEMORY_AUTH__ACTOR_PROXY_SECRET
-                  optional: true
           resources:
             {{- toYaml .Values.mcpAuth.resources | nindent 12 }}
           livenessProbe:

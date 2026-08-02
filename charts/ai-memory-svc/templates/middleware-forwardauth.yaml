@@ -26,12 +26,11 @@ spec:
       - X-Memory-Actor-User
       - X-Memory-Actor-Sub
       - X-Memory-Actor-Client
+      # Issuer rides with Sub: the engine (>= v1.22.0) treats them as a pair —
+      # OIDC only guarantees subject uniqueness within an issuer, and a
+      # partial pair is rejected with 400.
+      - X-Memory-Actor-Issuer
       - X-Memory-Actor-Agent
-      # Trust proof for the actor headers above (engine ≥ v1.22.0, rung 1b).
-      # Listing it here does double duty: Traefik copies mcp-auth's value onto
-      # the upstream request AND replaces anything the client tried to send —
-      # a forged or duplicated header never survives past this middleware.
-      - X-Memory-Actor-Proxy-Secret
       # When the mcp-auth has UPSTREAM_AUTH_TOKEN, it returns a static Authorization: Bearer <token>;
       # Traefik replaces the JWT with it before ai-memory (which does an exact match of the
       # AI_MEMORY_AUTH_TOKEN, without validating the JWT). Empty = mcp-auth does not set it, the original Authorization passes through.
