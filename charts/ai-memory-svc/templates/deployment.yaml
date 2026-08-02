@@ -296,6 +296,16 @@ spec:
             - name: HOOK_AUTH_USERNAME
               value: {{ . | quote }}
             {{- end }}
+            # Same key the engine reads via envFrom — one secret, two
+            # consumers, so the sidecar's echo and the engine's expectation
+            # can never drift apart. OPTIONAL: absent key = identity headers
+            # stay advisory and the engine ignores them (pre-1.22 behaviour).
+            - name: ACTOR_PROXY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ai-memory-svc.secretName" . }}
+                  key: AI_MEMORY_AUTH__ACTOR_PROXY_SECRET
+                  optional: true
           resources:
             {{- toYaml .Values.mcpAuth.resources | nindent 12 }}
           livenessProbe:

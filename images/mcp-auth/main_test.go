@@ -207,6 +207,28 @@ func TestVerifyHookTokenOnHookPath(t *testing.T) {
 	}
 }
 
+// The engine (≥ v1.22.0) discards the X-Memory-Actor-* headers unless the
+// request also carries [auth].actor_proxy_secret. Both authenticated paths
+// must echo it when configured — and neither may emit it when not, because a
+// stale echoed value would just be a wrong secret the engine rejects.
+func TestHookTokenPathEchoesActorProxySecretWhenConfigured(t *testing.T) {
+	setupHookToken(t)
+	actorProxySecret = "proxy-shared-secret"
+	t.Cleanup(func() { actorProxySecret = "" })
+	rec := verifyWith("POST", "/wiki/hook?event=pre-tool-use&agent=claude-code", "hook-secret")
+	if got := rec.Header().Get("X-Memory-Actor-Proxy-Secret"); got != "proxy-shared-secret" {
+		t.Errorf("X-Memory-Actor-Proxy-Secret = %q, want the configured secret", got)
+	}
+}
+
+func TestHookTokenPathOmitsActorProxySecretWhenUnset(t *testing.T) {
+	setupHookToken(t)
+	rec := verifyWith("POST", "/wiki/hook?event=pre-tool-use&agent=claude-code", "hook-secret")
+	if got := rec.Header().Get("X-Memory-Actor-Proxy-Secret"); got != "" {
+		t.Errorf("X-Memory-Actor-Proxy-Secret = %q, want absent when unconfigured", got)
+	}
+}
+
 func TestPropagateIdentityHeadersDoesNotUseJwtSidAsActorSession(t *testing.T) {
 	rec := httptest.NewRecorder()
 	claims := jwt.MapClaims{
