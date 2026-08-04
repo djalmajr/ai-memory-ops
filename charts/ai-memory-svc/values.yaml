@@ -401,6 +401,20 @@ mcpAuth:
   # (agent hooks are headless and cannot run an interactive OAuth flow). The
   # token itself lives in the external Secret <release>-secrets under the
   # OPTIONAL key HOOK_AUTH_TOKEN: absent key = feature off, JWT-only behavior.
+  #
+  # ⚠️ INCOMPATIBLE WITH PER-OPERATOR OWNERSHIP (engine >= v1.22.0). One static
+  # token names ONE operator for every machine that holds it, and it can only
+  # assert a username — while a JWT request asserts the OIDC issuer+subject
+  # pair, which outranks the username. So the same human ends up with two
+  # different identities: handoffs and slots created through the hook token are
+  # owned by `user:<username>` and are invisible to that person's own MCP
+  # session, which filters as `oidc:<issuer><subject>`. Worse, every machine
+  # sharing the token collapses into a single operator, so per-user handoffs do
+  # not apply to that traffic at all.
+  #
+  # Leave BOTH unset on a multi-operator deploy and onboard people with the
+  # device login (see the operator runbook in CLAUDE.md) — their hooks then
+  # carry their own JWT and get the same identity on every path.
   hookAuth:
     username: ""                                    # propagated as X-Memory-Actor-User on hook-token requests
   resources:
