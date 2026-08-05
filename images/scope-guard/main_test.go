@@ -53,13 +53,13 @@ func TestAdmittedExactMatch(t *testing.T) {
 	rules := mustCompile(t, map[string][]ruleSpec{
 		"alice": {{Workspace: "alice", Project: "notes"}},
 	})
-	if !admitted(rules, "alice", "alice", "notes") {
+	if !admitted(rules, "alice", "alice", "notes", "write_page") {
 		t.Fatal("alice should be allowed in alice/notes")
 	}
-	if admitted(rules, "alice", "alice", "secrets") {
+	if admitted(rules, "alice", "alice", "secrets", "write_page") {
 		t.Fatal("alice/secrets must be rejected — project doesn't match")
 	}
-	if admitted(rules, "bob", "alice", "notes") {
+	if admitted(rules, "bob", "alice", "notes", "write_page") {
 		t.Fatal("bob in alice/notes must be rejected — user not in rules")
 	}
 }
@@ -68,13 +68,13 @@ func TestAdmittedRegexUnion(t *testing.T) {
 	rules := mustCompile(t, map[string][]ruleSpec{
 		"alice": {{Workspace: "alice|shared", Project: ".*"}},
 	})
-	if !admitted(rules, "alice", "shared", "any") {
+	if !admitted(rules, "alice", "shared", "any", "write_page") {
 		t.Fatal("alice should be allowed in shared/any via union")
 	}
-	if !admitted(rules, "alice", "alice", "deep/path/x.md") {
+	if !admitted(rules, "alice", "alice", "deep/path/x.md", "write_page") {
 		t.Fatal("alice should be allowed in alice/deep — .* matches everything")
 	}
-	if admitted(rules, "alice", "djalmajr", "notes") {
+	if admitted(rules, "alice", "djalmajr", "notes", "write_page") {
 		t.Fatal("alice in djalmajr/* must be rejected — workspace doesn't match union")
 	}
 }
@@ -85,15 +85,15 @@ func TestAdmittedWildcardUser(t *testing.T) {
 		"alice": {{Workspace: "alice", Project: ".*"}},
 	})
 	// Bob has no specific rule but `*` covers public.
-	if !admitted(rules, "bob", "public", "anything") {
+	if !admitted(rules, "bob", "public", "anything", "write_page") {
 		t.Fatal("wildcard rule must apply to all users")
 	}
 	// Alice still gets her own rules even when * exists.
-	if !admitted(rules, "alice", "alice", "x") {
+	if !admitted(rules, "alice", "alice", "x", "write_page") {
 		t.Fatal("user-specific rule must still apply alongside *")
 	}
 	// Wildcard does NOT cover private workspaces.
-	if admitted(rules, "bob", "alice", "x") {
+	if admitted(rules, "bob", "alice", "x", "write_page") {
 		t.Fatal("wildcard must not grant access to private workspaces")
 	}
 }
@@ -104,10 +104,10 @@ func TestAdmittedAnchored(t *testing.T) {
 	})
 	// A naive "contains" check would allow alice-evil / notes-evil;
 	// the auto-anchor `^…$` prevents that.
-	if admitted(rules, "alice", "alice-evil", "notes") {
+	if admitted(rules, "alice", "alice-evil", "notes", "write_page") {
 		t.Fatal("alice-evil must be rejected — regex must be anchored")
 	}
-	if admitted(rules, "alice", "alice", "notes-secret") {
+	if admitted(rules, "alice", "alice", "notes-secret", "write_page") {
 		t.Fatal("notes-secret must be rejected — regex must be anchored")
 	}
 }
@@ -166,5 +166,46 @@ func TestCompileSurfacesBadPattern(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("malformed regex must surface as compile error at startup")
+	}
+}
+
+// A rule without `ops` keeps its historical meaning — every gated operation —
+// so existing ACLs behave identically after the field was introduced.
+func TestRuleWithoutOpsAppliesToEveryOp(t *testing.T) {
+	rules, err := compile(map[string][]ruleSpec{
+		"alice": {{Workspace: "alice", Project: ".*"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range []string{"write_page", "consolidate", "delete", "purge_project"} {
+		if !admitted(rules, "alice", "alice", "notes", op) {
+			t.Errorf("alice should be allowed to %s", op)
+		}
+	}
+}
+
+// The case this field exists for: the server's own scheduled lint/consolidation
+// carries no actor, so it arrives as the empty user. Admitting it must NOT also
+// hand an unidentified caller the destructive operations.
+func TestEmptyUserCanBeLimitedToConsolidate(t *testing.T) {
+	rules, err := compile(map[string][]ruleSpec{
+		"":      {{Workspace: ".*", Project: ".*", Ops: []string{"consolidate"}}},
+		"alice": {{Workspace: "alice", Project: ".*"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !admitted(rules, "", "anything", "anywhere", "consolidate") {
+		t.Fatal("the scheduler's unattributed consolidate must be admitted")
+	}
+	for _, op := range []string{"write_page", "delete", "purge_project", "move_project"} {
+		if admitted(rules, "", "anything", "anywhere", op) {
+			t.Errorf("unattributed %s must stay rejected", op)
+		}
+	}
+	// A named user's own rule is unaffected by the empty-user entry.
+	if !admitted(rules, "alice", "alice", "notes", "delete") {
+		t.Fatal("alice's unscoped rule should still cover every op")
 	}
 }

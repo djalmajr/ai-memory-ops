@@ -59,11 +59,21 @@ type payload struct {
 type ruleSpec struct {
 	Workspace string `json:"workspace"`
 	Project   string `json:"project"`
+	// Ops narrows a rule to specific admission operations (`consolidate`,
+	// `write_page`, `delete`, …). Omitted or empty = every gated op, which
+	// is what every rule written before this field existed means.
+	//
+	// It exists so a rule can admit the SERVER's own unattributed work —
+	// scheduled lint/consolidation carries no actor by design — without
+	// also handing an unidentified caller `delete` and `purge_project`.
+	Ops []string `json:"ops,omitempty"`
 }
 
 type compiledRule struct {
 	Workspace *regexp.Regexp
 	Project   *regexp.Regexp
+	// nil = the rule applies to every op; otherwise a membership set.
+	Ops map[string]struct{}
 }
 
 func compile(rules map[string][]ruleSpec) (map[string][]compiledRule, error) {
@@ -78,7 +88,14 @@ func compile(rules map[string][]ruleSpec) (map[string][]compiledRule, error) {
 			if err != nil {
 				return nil, &compileErr{User: user, Field: "project", Pattern: spec.Project, Err: err}
 			}
-			out[user] = append(out[user], compiledRule{Workspace: ws, Project: proj})
+			var ops map[string]struct{}
+			if len(spec.Ops) > 0 {
+				ops = make(map[string]struct{}, len(spec.Ops))
+				for _, op := range spec.Ops {
+					ops[op] = struct{}{}
+				}
+			}
+			out[user] = append(out[user], compiledRule{Workspace: ws, Project: proj, Ops: ops})
 		}
 	}
 	return out, nil
@@ -98,10 +115,16 @@ func (e *compileErr) Error() string {
 // admitted decides whether (user, workspace, project) is allowed by the
 // rule set. The wildcard user key `*` applies to every caller — its
 // rules are evaluated in addition to the user-specific ones.
-func admitted(rules map[string][]compiledRule, user, workspace, project string) bool {
+func admitted(rules map[string][]compiledRule, user, workspace, project, op string) bool {
 	for _, key := range []string{user, "*"} {
 		for _, r := range rules[key] {
-			if r.Workspace.MatchString(workspace) && r.Project.MatchString(project) {
+			if !r.Workspace.MatchString(workspace) || !r.Project.MatchString(project) {
+				continue
+			}
+			if r.Ops == nil {
+				return true
+			}
+			if _, ok := r.Ops[op]; ok {
 				return true
 			}
 		}
@@ -147,7 +170,7 @@ func handler(logger *slog.Logger, rules map[string][]compiledRule) http.HandlerF
 		user := p.Ctx.Actor.User
 		ws := p.Ctx.Workspace
 		proj := p.Ctx.Project
-		if admitted(rules, user, ws, proj) {
+		if admitted(rules, user, ws, proj, p.Ctx.Op) {
 			logger.Debug("admit", "user", user, "workspace", ws, "project", proj, "op", p.Ctx.Op)
 			w.Header().Set("content-type", "application/json")
 			// Empty body = "allow, no page mutation"; the engine treats

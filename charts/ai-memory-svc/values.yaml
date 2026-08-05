@@ -197,9 +197,26 @@ webhooks:
   # write/delete/consolidate/move through this hook FIRST (failure_policy:
   # reject is forced when enabled, see `_helpers.tpl scopeGuardEntry`).
   # Each rule is `{workspace: <regex>, project: <regex>}`, auto-anchored
-  # with ^…$. The wildcard user `*` applies to every caller in addition
-  # to their own rules. Reads are NOT gated — engine has no read
-  # admission chain.
+  # with ^…$, plus an optional `ops: [<op>, …]` that narrows the rule to
+  # specific admission operations (omitted = every gated op, which is what
+  # every rule written before that field existed means). The wildcard user
+  # `*` applies to every caller in addition to their own rules. Reads are
+  # NOT gated — engine has no read admission chain.
+  #
+  # ⚠️ The engine's SCHEDULED maintenance (lint, consolidation) carries NO
+  # actor by design — the multi-operator work made the scheduler stage
+  # unattributed on purpose, so it cannot collide with an interactive
+  # caller's bucket. It therefore reaches this webhook as the empty user
+  # and is rejected by an ACL that only names humans, silently and
+  # forever: the job retries, the lint never runs, and the log fills with
+  # 403s. Admit it with a rule for the empty user, narrowed by `ops` so an
+  # unidentified caller does NOT also get `delete`/`purge_project`:
+  #
+  #   rules:
+  #     "":
+  #       - workspace: ".*"
+  #         project: ".*"
+  #         ops: ["consolidate"]
   #
   # Defaults: enabled=false, rules={} (empty ACL → deny-by-default; the
   # pod starts but every write is rejected until an operator populates
