@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -328,6 +331,8 @@ func TestMetricsExposesHealthState(t *testing.T) {
 	m.mu.Lock()
 	m.dirty = true
 	m.mu.Unlock()
+	m.moveSessionNoops.Store(2)
+	m.unsupportedOpHits.Store(7)
 
 	code, body := getHandler(t, m.handleMetrics)
 	if code != http.StatusOK {
@@ -337,6 +342,8 @@ func TestMetricsExposesHealthState(t *testing.T) {
 		"git_mirror_last_push_ok_timestamp_seconds 12345",
 		"git_mirror_consecutive_push_failures 3",
 		"git_mirror_dirty 1",
+		"git_mirror_move_session_noops_total 2",
+		"git_mirror_unsupported_ops_total 7",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics body missing %q\n---\n%s", want, body)
@@ -399,5 +406,210 @@ func TestFetchLiveProjectsErrorsOnNon200(t *testing.T) {
 	m := &mirror{engineURL: srv.URL, httpc: srv.Client()}
 	if _, err := m.fetchLiveProjects(context.Background()); err == nil {
 		t.Fatal("want error on non-200 (fail-safe: caller prunes nothing)")
+	}
+}
+
+// postSync drives the real HTTP handler, which is where op routing lives —
+// calling the op methods directly would not catch a mis-wired switch.
+// An empty `op` leaves the header off entirely (pre-header engine build).
+func postSync(t *testing.T, m *mirror, op, body string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/sync", strings.NewReader(body))
+	if op != "" {
+		req.Header.Set("X-Memory-Op", op)
+	}
+	rec := httptest.NewRecorder()
+	m.handleSync(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// commitCount counts commits on HEAD; a tree with no commits yet counts 0.
+func commitCount(t *testing.T, work string) int {
+	t.Helper()
+	out, err := exec.Command("git", "-C", work, "rev-list", "--count", "HEAD").CombinedOutput()
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatalf("rev-list --count: %q: %v", out, err)
+	}
+	return n
+}
+
+// The engine's move_session notify carries the source scope in ctx and the
+// destination in ctx.destination_*. Locks the field names against the engine
+// contract (crates/ai-memory-wiki/src/admission.rs: destination_workspace /
+// destination_project) — a rename upstream must fail here, not silently log
+// empty destinations in production.
+func TestPayloadParsesDestinationScope(t *testing.T) {
+	p := decodePayload(t, `{
+		"page": { "path": "", "frontmatter": {}, "body": "" },
+		"ctx":  {
+			"workspace": "default", "project": "src",
+			"destination_workspace": "djalmajr", "destination_project": "dst",
+			"op": "move_session", "actor": { "user": "djalmajr" }
+		}
+	}`)
+	if p.Ctx.Workspace != "default" || p.Ctx.Project != "src" {
+		t.Fatalf("source scope not parsed: %+v", p.Ctx)
+	}
+	if p.Ctx.DestinationWorkspace != "djalmajr" || p.Ctx.DestinationProject != "dst" {
+		t.Fatalf("destination scope not parsed: %+v", p.Ctx)
+	}
+	// Non-move ops omit the keys entirely (serde skip_serializing_if).
+	q := decodePayload(t, `{
+		"page": { "path": "a.md", "frontmatter": {}, "body": "x" },
+		"ctx":  { "workspace": "default", "project": "src" }
+	}`)
+	if q.Ctx.DestinationWorkspace != "" || q.Ctx.DestinationProject != "" {
+		t.Fatalf("absent destination keys must decode empty: %+v", q.Ctx)
+	}
+}
+
+// move_session must NOT fall through to writePage (which errored on the empty
+// page path) and must NOT guess a git action: the payload has no session id,
+// so the only reachable target would be the whole sessions/ directory of the
+// source project — taking every unrelated session's page with it. Contract:
+// success to the engine, working tree untouched, counted for alerting.
+func TestMoveSessionIsAcknowledgedWithoutTouchingTree(t *testing.T) {
+	m, ctx, work := bootstrapMirror(t)
+	for _, id := range []string{"019e-aaa", "019e-bbb"} {
+		must(t, m.writePage(ctx, decodePayload(t, `{
+			"page": { "path": "sessions/`+id+`.md", "frontmatter": {}, "body": "s" },
+			"ctx":  { "workspace": "default", "project": "src", "actor": { "user": "djalmajr" } }
+		}`)))
+	}
+	before := commitCount(t, work)
+
+	code, body := postSync(t, m, "move_session", `{
+		"page": { "path": "", "frontmatter": {}, "body": "" },
+		"ctx":  {
+			"workspace": "default", "project": "src",
+			"destination_workspace": "default", "destination_project": "dst",
+			"actor": { "user": "djalmajr" }
+		}
+	}`)
+	if code != http.StatusNoContent {
+		t.Fatalf("move_session: want 204, got %d (%s)", code, body)
+	}
+
+	// Every session page of the source project survives untouched.
+	for _, id := range []string{"019e-aaa", "019e-bbb"} {
+		if _, err := os.Stat(filepath.Join(work, "wiki", "default", "src", "sessions", id+".md")); err != nil {
+			t.Fatalf("session page %s must survive a move_session: %v", id, err)
+		}
+	}
+	// Nothing invented at the destination either.
+	if _, err := os.Stat(filepath.Join(work, "wiki", "default", "dst")); !os.IsNotExist(err) {
+		t.Fatalf("destination tree must not be fabricated, stat err = %v", err)
+	}
+	if got := commitCount(t, work); got != before {
+		t.Fatalf("move_session must not commit: %d commits before, %d after", before, got)
+	}
+	if got := m.moveSessionNoops.Load(); got != 1 {
+		t.Fatalf("move_session skip must be counted once, got %d", got)
+	}
+	if got := m.unsupportedOpHits.Load(); got != 0 {
+		t.Fatalf("move_session is handled, not unsupported; got %d", got)
+	}
+}
+
+// An op this build does not implement must fail loudly instead of being
+// mirrored as a page write. The payload here is deliberately a VALID page
+// write (non-empty path + body): under the old `default: writePage` routing
+// it would have been committed happily under the wrong semantics, and the
+// 500 would never have appeared.
+func TestUnsupportedOpIsRefusedInsteadOfWritten(t *testing.T) {
+	m, ctx, work := bootstrapMirror(t)
+	must(t, m.writePage(ctx, decodePayload(t, `{
+		"page": { "path": "seed.md", "frontmatter": {}, "body": "seed" },
+		"ctx":  { "workspace": "default", "project": "app", "actor": { "user": "djalmajr" } }
+	}`)))
+	before := commitCount(t, work)
+
+	for _, op := range []string{"move_project", "purge_workspace", "handoff_begin", "totally_new_op"} {
+		code, body := postSync(t, m, op, `{
+			"page": { "path": "notes/should-not-exist.md", "frontmatter": {}, "body": "nope" },
+			"ctx":  { "workspace": "default", "project": "app", "actor": { "user": "djalmajr" } }
+		}`)
+		if code != http.StatusInternalServerError {
+			t.Fatalf("op %q: want 500, got %d (%s)", op, code, body)
+		}
+		if !strings.Contains(body, "unsupported admission op") {
+			t.Fatalf("op %q: error body should name the refusal, got %q", op, body)
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(work, "wiki", "default", "app", "notes", "should-not-exist.md")); !os.IsNotExist(err) {
+		t.Fatalf("a refused op must write nothing, stat err = %v", err)
+	}
+	if got := commitCount(t, work); got != before {
+		t.Fatalf("a refused op must not commit: %d commits before, %d after", before, got)
+	}
+	if got := m.unsupportedOpHits.Load(); got != 4 {
+		t.Fatalf("want 4 refusals counted, got %d", got)
+	}
+}
+
+// A hostile/oversized op header is truncated everywhere it is echoed: the
+// response body the engine logs, AND both of the mirror's own log lines.
+func TestUnsupportedOpTruncatesHeaderEcho(t *testing.T) {
+	m, _, _ := bootstrapMirror(t)
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	long := strings.Repeat("A", 500)
+	code, body := postSync(t, m, long, `{"page":{"path":"x.md"},"ctx":{}}`)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("want 500, got %d", code)
+	}
+	if strings.Contains(body, long) || len(body) > 200 {
+		t.Fatalf("op echo should be truncated, got %d bytes: %q", len(body), body)
+	}
+	if strings.Contains(logs.String(), long) {
+		t.Fatalf("full op header leaked into the log:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "unsupported admission op") {
+		t.Fatalf("refusal should still be logged:\n%s", logs.String())
+	}
+}
+
+// The ops that ARE page writes keep reaching writePage — including the empty
+// header, the documented fallback for a pre-`X-Memory-Op` engine build.
+func TestHandleSyncRoutesPageWriteOps(t *testing.T) {
+	m, _, work := bootstrapMirror(t)
+	for _, op := range []string{"write_page", "consolidate", ""} {
+		name := op
+		if name == "" {
+			name = "no-header"
+		}
+		code, body := postSync(t, m, op, `{
+			"page": { "path": "notes/`+name+`.md", "frontmatter": {"title":"T"}, "body": "b" },
+			"ctx":  { "workspace": "default", "project": "app", "actor": { "user": "djalmajr" } }
+		}`)
+		if code != http.StatusNoContent {
+			t.Fatalf("op %q: want 204, got %d (%s)", op, code, body)
+		}
+		if _, err := os.Stat(filepath.Join(work, "wiki", "default", "app", "notes", name+".md")); err != nil {
+			t.Fatalf("op %q should have mirrored the page: %v", op, err)
+		}
+	}
+	// ...and delete still removes, through the same handler.
+	code, body := postSync(t, m, "delete", `{
+		"page": { "path": "notes/write_page.md", "frontmatter": {}, "body": "" },
+		"ctx":  { "workspace": "default", "project": "app", "actor": { "user": "djalmajr" } }
+	}`)
+	if code != http.StatusNoContent {
+		t.Fatalf("delete: want 204, got %d (%s)", code, body)
+	}
+	if _, err := os.Stat(filepath.Join(work, "wiki", "default", "app", "notes", "write_page.md")); !os.IsNotExist(err) {
+		t.Fatalf("delete should have removed the page, stat err = %v", err)
+	}
+	if got := m.unsupportedOpHits.Load(); got != 0 {
+		t.Fatalf("known ops must not be counted as unsupported, got %d", got)
 	}
 }

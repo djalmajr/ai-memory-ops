@@ -50,7 +50,13 @@ type payload struct {
 	Ctx struct {
 		Workspace string `json:"workspace"`
 		Project   string `json:"project"`
-		Actor     struct {
+		// Move ops (`move_project`, `move_session`) carry the SOURCE scope in
+		// workspace/project and the DESTINATION here. The engine omits both
+		// keys for every other op (serde `skip_serializing_if`), so an empty
+		// string means "not a move".
+		DestinationWorkspace string `json:"destination_workspace"`
+		DestinationProject   string `json:"destination_project"`
+		Actor                struct {
 			Agent string `json:"agent"`
 			User  string `json:"user"`
 		} `json:"actor"`
@@ -78,6 +84,13 @@ type mirror struct {
 	// block a probe or a scrape).
 	lastPushOKUnix atomic.Int64 // unix seconds of the last successful push
 	consecPushFail atomic.Int64 // consecutive push failures since last success
+
+	// Notifies the engine delivered that this mirror deliberately did NOT
+	// apply to the working tree. Both mean "the backup may now diverge from
+	// the engine", which is the thing an operator needs to be able to alert
+	// on — a divergence that only shows up as a log line gets missed.
+	moveSessionNoops  atomic.Int64 // move_session notifies skipped (see moveSession)
+	unsupportedOpHits atomic.Int64 // notifies for an op this build cannot mirror
 
 	// Reconciliation: periodically prune backup project dirs whose project no
 	// longer exists in the engine (orphans left by a purge that bypassed the
@@ -359,6 +372,97 @@ func (m *mirror) purgeProject(ctx context.Context, p payload) error {
 	return m.commitDirty(ctx, changeMessage("purge", p, relPath))
 }
 
+// moveSession acknowledges a session that changed project WITHOUT touching
+// the working tree, on purpose.
+//
+// Why a no-op and not a `git mv`: the notify carries the source scope in
+// ctx.workspace/project and the destination in ctx.destination_*, but the
+// engine calls it with NO page path (`chain.notify(None, &ctx)` in
+// crates/ai-memory-wiki/src/wiki.rs::move_session_page) and the session id
+// appears nowhere else in the payload. The file that actually moves is
+// `sessions/<session-id>.md` — a name this webhook cannot reconstruct from
+// what it is given.
+//
+// The only git action reachable from source+destination alone would operate
+// on the whole `sessions/` directory of the source project, which would
+// move or delete the pages of every OTHER session that lived there. Keeping
+// one stale session page in the backup is strictly less harmful than
+// dropping N unrelated ones, so the mirror declines to guess.
+//
+// The divergence is real and is not papered over: the engine relocates the
+// file with a plain `std::fs::rename` inside the same critical section,
+// outside the admission chain, so NO write_page/delete follows to repair the
+// backup. After a `pages=move` the backup keeps the page under the source
+// project and never receives the destination copy. Repair is
+// `scripts/git-mirror-backfill.py`, which re-syncs the whole tree in one
+// commit. The counter behind `git_mirror_move_session_noops_total` is there
+// so that repair can be triggered by an alert instead of by luck.
+//
+// Note the chart does NOT subscribe git-mirror to `move_session`; this path
+// exists so that an operator who adds the event gets a logged, counted
+// skip instead of a bogus write.
+func (m *mirror) moveSession(p payload) error {
+	m.moveSessionNoops.Add(1)
+	slog.Warn("move_session not mirrored: payload carries no session id, "+
+		"so the moved sessions/<id>.md cannot be identified; the backup may "+
+		"keep a stale copy under the source project "+
+		"(repair: scripts/git-mirror-backfill.py)",
+		"from_workspace", defaultStr(p.Ctx.Workspace, "default"),
+		"from_project", defaultStr(p.Ctx.Project, "_unscoped"),
+		"to_workspace", p.Ctx.DestinationWorkspace,
+		"to_project", p.Ctx.DestinationProject,
+		"actor", actorOf(p))
+	return nil
+}
+
+// unsupportedOp refuses a lifecycle op this build does not implement.
+//
+// Loud on purpose: a 500 here is inert for the deployed configuration
+// (git-mirror runs `blocking: false, failure_policy: ignore`, so the engine
+// only logs it) but it surfaces on BOTH sides — engine warning, mirror ERROR
+// line, and a counter to alert on — instead of silently corrupting the
+// backup. Note: `failure_policy: reject` alone does NOT abort the write —
+// the engine only awaits a hook that is ALSO `blocking: true`, since a
+// non-blocking webhook "can't mutate or reject" (engine admission.rs:563).
+// Aborting a user's write because the BACKUP cannot mirror it would be the
+// wrong trade anyway; the counter is the intended signal.
+func (m *mirror) unsupportedOp(op string) error {
+	m.unsupportedOpHits.Add(1)
+	// The op is an attacker-reachable header value; keep it short in logs
+	// and in the body echoed back to the engine.
+	shown := truncate(op, 64)
+	slog.Error("unsupported admission op: refusing to guess a git action "+
+		"(the backup will diverge for this operation)", "op", shown)
+	return fmt.Errorf("unsupported admission op %q", shown)
+}
+
+// truncate caps an untrusted string for log/response use. Cuts on a rune
+// boundary so a multi-byte header value cannot leave invalid UTF-8 in the
+// JSON log line.
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}
+
+// actorOf resolves the human/agent behind a payload, "anonymous" when the
+// engine sent neither (its scheduled jobs carry no attribution by design).
+func actorOf(p payload) string {
+	who := p.Ctx.Actor.User
+	if who == "" {
+		who = p.Ctx.Actor.Agent
+	}
+	if who == "" {
+		who = "anonymous"
+	}
+	return who
+}
+
 // commitDirty commits the currently-staged change and signals the push
 // loop. A no-op staging area (engine replayed an already-applied removal)
 // is treated as success. Callers hold m.mu.
@@ -426,14 +530,7 @@ func commitMessage(p payload, rel string) string {
 // changeMessage builds a commit message "<verb> <rel>\n\nby: <actor>" for
 // any working-tree change (sync/delete/purge).
 func changeMessage(verb string, p payload, rel string) string {
-	who := p.Ctx.Actor.User
-	if who == "" {
-		who = p.Ctx.Actor.Agent
-	}
-	if who == "" {
-		who = "anonymous"
-	}
-	return fmt.Sprintf("%s %s\n\nby: %s", verb, rel, who)
+	return fmt.Sprintf("%s %s\n\nby: %s", verb, rel, actorOf(p))
 }
 
 // pushLoop runs forever, debouncing commits into batched pushes. It waits
@@ -519,20 +616,35 @@ func (m *mirror) handleSync(w http.ResponseWriter, r *http.Request) {
 	// keep it tight: mutate working tree + commit, push is async.
 	// failure_policy=ignore in the chart means even an error won't block
 	// the engine. The lifecycle op rides in the `X-Memory-Op` header
-	// (see engine `crate::admission::AdmissionOp`); an empty/unknown op
-	// falls back to the write path for backward compatibility.
+	// (see engine `crate::admission::AdmissionOp`).
+	//
+	// Routing is EXHAUSTIVE by op name. Only the ops whose payload really is
+	// a page write reach writePage; everything else is either implemented or
+	// refused. An unrecognised op used to land on writePage, which is the one
+	// outcome a backup must never have: it would either error out on the
+	// empty page path (the observable symptom) or, for an op that does carry
+	// a path, write a file the engine never asked for.
+	//
+	// The empty op keeps the old fallback ON PURPOSE: it is what a pre-header
+	// engine build sends, and for those every notify was a page write.
 	op := r.Header.Get("X-Memory-Op")
 	var opErr error
 	switch op {
+	case "write_page", "consolidate", "":
+		opErr = m.writePage(r.Context(), in)
 	case "delete":
 		opErr = m.deletePage(r.Context(), in)
 	case "purge_project":
 		opErr = m.purgeProject(r.Context(), in)
+	case "move_session":
+		opErr = m.moveSession(in)
 	default:
-		opErr = m.writePage(r.Context(), in)
+		opErr = m.unsupportedOp(op)
 	}
 	if opErr != nil {
-		slog.Warn("mirror sync failed", "op", op, "path", in.Page.Path, "err", opErr)
+		// `op` is an untrusted header value; cap it here too so a junk header
+		// cannot flood the log through the generic failure path.
+		slog.Warn("mirror sync failed", "op", truncate(op, 64), "path", in.Page.Path, "err", opErr)
 		http.Error(w, opErr.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -589,8 +701,15 @@ func (m *mirror) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 			"git_mirror_consecutive_push_failures %d\n"+
 			"# HELP git_mirror_dirty Whether commits are pending push (1) or not (0).\n"+
 			"# TYPE git_mirror_dirty gauge\n"+
-			"git_mirror_dirty %d\n",
-		m.lastPushOKUnix.Load(), m.consecPushFail.Load(), dirty)
+			"git_mirror_dirty %d\n"+
+			"# HELP git_mirror_move_session_noops_total move_session notifies acknowledged without mirroring (backup may hold a stale session page).\n"+
+			"# TYPE git_mirror_move_session_noops_total counter\n"+
+			"git_mirror_move_session_noops_total %d\n"+
+			"# HELP git_mirror_unsupported_ops_total Admission notifies refused because this build cannot mirror the op.\n"+
+			"# TYPE git_mirror_unsupported_ops_total counter\n"+
+			"git_mirror_unsupported_ops_total %d\n",
+		m.lastPushOKUnix.Load(), m.consecPushFail.Load(), dirty,
+		m.moveSessionNoops.Load(), m.unsupportedOpHits.Load())
 }
 
 // adminProject is one entry of the engine's `GET /admin/projects` response.

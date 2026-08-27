@@ -16,3 +16,7 @@ dist/
 .idea/
 .vscode/
 .claude/
+
+# binário compilado — o Dockerfile builda do fonte
+images/scope-guard/scope-guard
+images/git-mirror/git-mirror

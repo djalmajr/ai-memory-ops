@@ -8,6 +8,13 @@
 // reason string — the engine's admission chain (with `failure_policy:
 // reject`) aborts the write atomically before disk/DB.
 //
+// Ops that relocate content (`move_project`, `move_session`) are checked
+// against BOTH scopes: the source `(ctx.workspace, ctx.project)` and the
+// destination `(ctx.destination_workspace, ctx.destination_project)`. A
+// caller admitted only at the source could otherwise push content into a
+// workspace/project it cannot write to directly. A move that arrives with
+// no usable destination is rejected (fail-closed) — see `evaluate`.
+//
 // This is a write-side ACL, not a read-side one — the engine has no
 // read admission chain. For real read privacy, run separate ai-memory
 // instances.
@@ -47,10 +54,30 @@ import (
 type payload struct {
 	Page json.RawMessage `json:"page"`
 	Ctx  struct {
+		// Workspace/Project are the SOURCE scope. For every op except the
+		// moves they are the only scope there is; for a move they name where
+		// the content is coming FROM.
 		Workspace string `json:"workspace"`
 		Project   string `json:"project"`
-		Op        string `json:"op"`
-		Actor     struct {
+		// DestinationWorkspace/DestinationProject name where a move op puts
+		// the content. They mirror the engine's
+		// `AdmissionContext::destination_{workspace,project}`, both
+		// `Option<String>` serialised with `skip_serializing_if =
+		// "Option::is_none"` — so on a non-move op the keys are absent from
+		// the JSON entirely rather than sent as `null`.
+		//
+		// Pointers rather than plain strings: a plain `string` collapses
+		// "the engine never sent this field" and "the engine sent an empty
+		// name" into the same `""`. Both are refused for a move (see
+		// evaluate), so the distinction never changes the decision — but it
+		// is the whole difference between "engine predates the field / is
+		// not wiring it" and "engine sent a broken scope" when an operator
+		// triages a move that suddenly started 403-ing, and the reject log
+		// can only say which one happened if the parse kept them apart.
+		DestinationWorkspace *string `json:"destination_workspace"`
+		DestinationProject   *string `json:"destination_project"`
+		Op                   string  `json:"op"`
+		Actor                struct {
 			User string `json:"user"`
 		} `json:"actor"`
 	} `json:"ctx"`
@@ -132,6 +159,92 @@ func admitted(rules map[string][]compiledRule, user, workspace, project, op stri
 	return false
 }
 
+// isMoveOp reports whether an admission op relocates content, i.e. whether it
+// carries a destination scope that must be authorised on top of the source
+// one. Deliberately an explicit allow-list: a future relocating op that isn't
+// listed here is still checked against its source scope exactly as today —
+// it just doesn't get the extra destination check until someone adds it.
+func isMoveOp(op string) bool {
+	switch op {
+	case "move_project", "move_session":
+		return true
+	}
+	return false
+}
+
+// scopeOf derefs an optional ctx field. A nil pointer (key absent) and an
+// empty string (key present but blank) are equally unusable as a scope, so
+// they collapse here; describeScope keeps them apart for the log.
+func scopeOf(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// describeScope renders an optional ctx field for logs/errors, distinguishing
+// "the key wasn't in the payload" from "the key was there and empty".
+func describeScope(p *string) string {
+	switch {
+	case p == nil:
+		return "absent"
+	case *p == "":
+		return "empty"
+	default:
+		return quote(*p)
+	}
+}
+
+// evaluate applies the ACL to one parsed request and returns the decision plus,
+// on a reject, a reason naming the side that failed.
+//
+// Non-move ops are checked exactly as they always were: one `admitted` call on
+// (user, workspace, project, op).
+//
+// Move ops (`move_project`, `move_session`) must satisfy the ACL on BOTH ends.
+// Source-only checking — what this webhook did before — lets any caller
+// admitted somewhere relocate content into a workspace/project it has no write
+// rights to at all, which is a strictly larger capability than the writes the
+// ACL grants it: the destination is where the content actually lands, so the
+// destination scope has to authorise it too.
+//
+// A move whose destination is absent or empty is DENIED, and there is no knob
+// to change that. Fail-open here would restore the exact hole being closed,
+// and it would be reachable by omitting a field — i.e. controlled by the
+// caller, not the operator. It also costs nothing in practice: the engine
+// constructs both move contexts with `destination_{workspace,project}:
+// Some(...)` unconditionally (crates/ai-memory-mcp/src/admin.rs, move_project
+// and move_session), and the fields landed in the same commits as the ops
+// themselves, so no engine version can emit a move without them. A move that
+// arrives here with no destination is a forged payload or an engine
+// regression, and in both cases "I can't tell where this lands" must not read
+// as "allowed".
+func evaluate(rules map[string][]compiledRule, user, ws, proj, op string, destWS, destProj *string) (bool, string) {
+	move := isMoveOp(op)
+	if !admitted(rules, user, ws, proj, op) {
+		if move {
+			return false, "scope-guard: user " + quote(user) + " not allowed to " + op +
+				" out of " + quote(ws) + "/" + quote(proj) + " (source scope)"
+		}
+		return false, "scope-guard: user " + quote(user) + " not allowed to " + op +
+			" in " + quote(ws) + "/" + quote(proj)
+	}
+	if !move {
+		return true, ""
+	}
+	dws, dproj := scopeOf(destWS), scopeOf(destProj)
+	if dws == "" || dproj == "" {
+		return false, "scope-guard: " + op + " out of " + quote(ws) + "/" + quote(proj) +
+			" denied: unusable destination scope (destination_workspace=" + describeScope(destWS) +
+			", destination_project=" + describeScope(destProj) + ") — move ops fail closed"
+	}
+	if !admitted(rules, user, dws, dproj, op) {
+		return false, "scope-guard: user " + quote(user) + " not allowed to " + op +
+			" into " + quote(dws) + "/" + quote(dproj) + " (destination scope)"
+	}
+	return true, ""
+}
+
 func loadRules() (map[string][]compiledRule, error) {
 	raw := os.Getenv("ACL_RULES")
 	if raw == "" {
@@ -170,17 +283,25 @@ func handler(logger *slog.Logger, rules map[string][]compiledRule) http.HandlerF
 		user := p.Ctx.Actor.User
 		ws := p.Ctx.Workspace
 		proj := p.Ctx.Project
-		if admitted(rules, user, ws, proj, p.Ctx.Op) {
-			logger.Debug("admit", "user", user, "workspace", ws, "project", proj, "op", p.Ctx.Op)
+		attrs := []any{"user", user, "workspace", ws, "project", proj, "op", p.Ctx.Op}
+		// Only moves carry a destination; logging it on every write_page
+		// would be constant "absent" noise.
+		if isMoveOp(p.Ctx.Op) {
+			attrs = append(attrs,
+				"destination_workspace", describeScope(p.Ctx.DestinationWorkspace),
+				"destination_project", describeScope(p.Ctx.DestinationProject))
+		}
+		allow, reason := evaluate(rules, user, ws, proj, p.Ctx.Op,
+			p.Ctx.DestinationWorkspace, p.Ctx.DestinationProject)
+		if allow {
+			logger.Debug("admit", attrs...)
 			w.Header().Set("content-type", "application/json")
 			// Empty body = "allow, no page mutation"; the engine treats
 			// missing `page.frontmatter` / `page.body` as unchanged.
 			_, _ = w.Write([]byte(`{}`))
 			return
 		}
-		logger.Info("reject", "user", user, "workspace", ws, "project", proj, "op", p.Ctx.Op)
-		reason := "scope-guard: user " + quote(user) + " not allowed to " + p.Ctx.Op +
-			" in " + quote(ws) + "/" + quote(proj)
+		logger.Info("reject", append(attrs, "reason", reason)...)
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": reason})

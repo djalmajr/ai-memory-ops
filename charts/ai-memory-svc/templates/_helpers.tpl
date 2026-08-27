@@ -151,6 +151,16 @@ failure_policy: {{ .Values.webhooks.gitMirror.failurePolicy | default "ignore" }
 # engine must not block writes waiting on the git push. Set
 # `webhooks.gitMirror.blocking=true` to restore synchronous behaviour.
 blocking: {{ .Values.webhooks.gitMirror.blocking | default false }}
+# Deliberately NOT subscribed:
+#   move_session   - the notify carries no session id (engine sends
+#                    `notify(None, ctx)`), so the mirror cannot name the
+#                    sessions/<id>.md that moved; it answers with a counted,
+#                    logged no-op (git_mirror_move_session_noops_total).
+#   move_project /
+#   purge_workspace - not implemented by the mirror; it refuses them with a
+#                    500 + git_mirror_unsupported_ops_total rather than
+#                    guessing a git action.
+# After any of those, re-sync the backup with scripts/git-mirror-backfill.py.
 events:
   - write_page
   - consolidate
