@@ -37,6 +37,26 @@ token root** — além disso o subcomando `write` depende do binário `ai-memory
 no PATH; sem ele, o bot fica somente-leitura (search/read/recent/projects,
 que são `curl` puro).
 
+## Alternativa: CLI `ai-memory` completo (superfície total)
+
+O wrapper NÃO é necessário — é conveniência portátil (bash+curl, 1 arquivo)
+com defaults seguros. Um bot com shell + token root pode fazer tudo de
+qualquer forma, então esconder verbos não é segurança. Se o objetivo é a
+superfície completa (delete-page, status, briefing via admin, etc.), instale
+o binário `ai-memory` compatível com a plataforma do bot e instrua:
+
+```
+Memória: CLI `ai-memory` (env AI_MEMORY_SERVER_URL + AI_MEMORY_AUTH_TOKEN).
+SEMPRE passe --workspace djalmajr --project <projeto> explícitos — você roda
+standalone; nunca confie na auto-derivação por cwd. Nunca use subcomandos
+destrutivos/admin (purge-project, reset, restore, move-*, user) sem ordem
+explícita do usuário.
+```
+
+Isso é instrução (soft), não contenção: os verbos destrutivos ficam a um
+`--confirm` de distância. Contenção real continua sendo credencial escopada
+por consumidor (issue #9).
+
 ## Modelo de ameaça (leia antes de dar o token a qualquer serviço)
 
 O wrapper tira o token de prompts, transcripts e configs — é **higiene, não
