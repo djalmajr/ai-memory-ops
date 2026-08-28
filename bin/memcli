@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # memcli — standalone client for the personal ai-memory server, over plain HTTP.
 #
-# Mirrors the officially documented surface (README "frontend API" section,
-# docs/frontend-api.md, docs/install.md, docs/usage.md in the upstream repo
-# github.com/akitaonrails/ai-memory). When in doubt, the official docs win.
+# Mirrors the officially documented read surface — every /api/v1 endpoint and
+# its documented query params (README "frontend API" section and
+# docs/frontend-api.md in github.com/akitaonrails/ai-memory). When in doubt,
+# the official docs win.
 #
 # THREAT MODEL (honest): this wrapper keeps the token out of prompts,
 # transcripts, and configs — it is HYGIENE and a portable convenience
@@ -30,25 +31,36 @@ usage() {
 cat <<'EOF'
 memcli — long-term personal memory (ai-memory) over plain HTTP, no MCP/hooks.
 
+Every read command accepts trailing key=value pairs, passed through verbatim
+as query params — the full documented option set of each endpoint (see
+docs/frontend-api.md upstream) is therefore available.
+
 DISCOVERY
   memcli workspaces                       Existing workspaces (with stats).
   memcli projects                         Projects in the current workspace.
   memcli graph                            Cross-project link graph (global).
 
-SEARCH AND READ (pure curl — works in any shell)
-  memcli search  <project> "<terms>" [N]  Full-text FTS5 search. N = max hits (default 5).
-  memcli read    <project> <path>         Full body of one page (e.g. decisions/x.md).
-  memcli pages   <project>                List ALL pages — use when lexical search misses.
-  memcli recent  <project> [N]            Most recently updated pages.
-  memcli briefing <project>               Structured snapshot: counts, activity, rules, recent.
-  memcli overview [<project>]             Workspace overview (open handoff + briefing + health),
-                                          or one project's overview.
+SEARCH (FTS5, lexical)
+  memcli search <project> "<terms>" [N] [k=v…]   One project. N = limit (1..100, default 5).
+  memcli search-all "<terms>" [N]                Global: every workspace/project at once.
+  memcli msearch "<terms>" [limit=N] <p1> [p2…]  Multi-scope POST (≤25 projects, current workspace).
 
-SESSIONS (raw evidence, pre-consolidation)
-  memcli handoffs <project> [state]       Handoffs (read-only; state: open|accepted|…).
+READ
+  memcli read    <project> <path>         Full body of one page (path is URL-encoded for you).
+  memcli pages   <project>                List ALL pages — use when lexical search misses.
+  memcli recent  <project> [N]            Most recently updated pages (limit 1..100, default 10).
+  memcli briefing <project> [k=v…]        Structured snapshot (limit=…).
+  memcli overview [<project>] [k=v…]      Workspace overview (open handoff + briefing + health),
+                                          or one project's overview (limit=…).
+
+SESSIONS (raw evidence, pre-consolidation; never cached)
+  memcli handoffs <project> [k=v…]        Read-only. state=open|… ; all_owners=true (root only).
                                           Creating/accepting handoffs is MCP-only.
-  memcli sessions <project>               Captured sessions.
-  memcli observations <project> <id>      Raw observations of one session.
+  memcli sessions <project> [k=v…]        limit=1..100 offset=N include_open=true|false
+  memcli observations <project> <id> [k=v…]
+                                          limit=1..200 offset=N order=asc|desc
+                                          kinds=user-prompt,stop,…  q=<fts5>  body_max_chars=200..16384
+                                          Response carries `total` — paginate with offset.
 
 MUTATION (delegated to the `ai-memory` binary; gated via environment)
   memcli write  <project> <path> -        Write a durable page (body via STDIN, first line "# Title").
@@ -62,7 +74,8 @@ DIAGNOSTICS
 SCOPE — always explicit
   Fixed workspace: "djalmajr" (override: MEMCLI_WORKSPACE). <project> is ALWAYS the
   first argument — this client runs from anywhere and never guesses the project
-  from the cwd. Unsure of the name? `memcli projects`.
+  from the cwd. Unsure of the name? `memcli projects`. Cross-project questions:
+  `memcli search-all` (anywhere) or `memcli msearch` (named projects).
 
 AUTHENTICATION — one key, two ways to use it
   The SAME key (AI_MEMORY_AUTH_TOKEN) works everywhere:
@@ -98,7 +111,7 @@ LIMITS — no single non-MCP interface is complete today
 OFFICIAL DOCUMENTATION (readable in the upstream repo)
   https://github.com/akitaonrails/ai-memory
     README.md            — overview + the full /api/v1 endpoint table
-    docs/frontend-api.md — /api/v1 reference (params, shapes)
+    docs/frontend-api.md — /api/v1 reference: every param, clamp, and shape
     docs/install.md      — binary install, thin-client usage, auth precedence
     docs/usage.md        — system usage
     docs/users.md        — per-user tokens (multi-user)
@@ -118,41 +131,84 @@ EOF
 api() { curl -fsS -H "Authorization: Bearer $(token)" "$@"; }
 proj_url() { printf '%s/api/v1/workspaces/%s/projects/%s' "$SERVER" "$WS" "$1"; }
 
+# GET with optional trailing key=value query params.
+api_get() {
+  local url="$1"; shift
+  local args=() kv
+  for kv in "$@"; do
+    case "$kv" in
+      *=*) args+=(--data-urlencode "$kv") ;;
+      *) echo "memcli: expected key=value, got '$kv'" >&2; exit 1 ;;
+    esac
+  done
+  api --get "$url" ${args[@]+"${args[@]}"}
+}
+
+# Percent-encode a page path, preserving '/' separators (byte-wise).
+enc_path() {
+  local s="$1" out='' i c
+  LC_ALL=C
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9./_~-]) out+="$c" ;;
+      *) out+=$(printf '%%%02X' "'$c") ;;
+    esac
+  done
+  printf %s "$out"
+}
+
+# Minimal JSON string escape (backslash + double quote).
+json_str() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$s"; }
+
 cmd="${1:-help}"; shift || true
 case "$cmd" in
   workspaces) api "$SERVER/api/v1/workspaces" ;;
-  projects)   api --get "$SERVER/api/v1/projects" --data-urlencode "workspace=$WS" ;;
+  projects)   api_get "$SERVER/api/v1/projects" "workspace=$WS" ;;
   graph)      api "$SERVER/api/v1/graph" ;;
   search)
-    proj="${1:?usage: memcli search <project> \"terms\" [N]}"; q="${2:?missing query}"; n="${3:-5}"
-    api --get "$SERVER/api/v1/search" \
-      --data-urlencode "q=$q" --data-urlencode "workspace=$WS" \
-      --data-urlencode "project=$proj" --data-urlencode "limit=$n" ;;
+    proj="${1:?usage: memcli search <project> \"terms\" [N] [key=value…]}"; q="${2:?missing query}"; shift 2
+    n=5; if [ -n "${1:-}" ] && [[ "$1" != *=* ]]; then n="$1"; shift; fi
+    api_get "$SERVER/api/v1/search" "q=$q" "workspace=$WS" "project=$proj" "limit=$n" "$@" ;;
+  search-all)
+    q="${1:?usage: memcli search-all \"terms\" [N]}"; n="${2:-10}"
+    api_get "$SERVER/api/v1/search" "q=$q" "limit=$n" ;;
+  msearch)
+    q="${1:?usage: memcli msearch \"terms\" [limit=N] <project1> [project2…]}"; shift
+    limit=10; if [[ "${1:-}" == limit=* ]]; then limit="${1#limit=}"; shift; fi
+    [ $# -ge 1 ] || { echo "usage: memcli msearch \"terms\" [limit=N] <project1> [project2…]" >&2; exit 1; }
+    [ $# -le 25 ] || { echo "memcli: POST /search accepts at most 25 scopes" >&2; exit 1; }
+    scopes=''
+    for p in "$@"; do
+      scopes+="${scopes:+,}{\"workspace\":$(json_str "$WS"),\"project\":$(json_str "$p")}"
+    done
+    api -H 'Content-Type: application/json' -X POST "$SERVER/api/v1/search" \
+      -d "{\"q\":$(json_str "$q"),\"limit\":$limit,\"scopes\":[$scopes]}" ;;
   read)
     proj="${1:?usage: memcli read <project> <path>}"; path="${2:?missing page path}"
-    api "$(proj_url "$proj")/pages/$path" ;;
+    api "$(proj_url "$proj")/pages/$(enc_path "$path")" ;;
   pages)
     proj="${1:?usage: memcli pages <project>}"
     api "$(proj_url "$proj")/pages" ;;
   recent)
     proj="${1:?usage: memcli recent <project> [N]}"; n="${2:-10}"
-    api --get "$(proj_url "$proj")/recent" --data-urlencode "limit=$n" ;;
+    api_get "$(proj_url "$proj")/recent" "limit=$n" ;;
   briefing)
-    proj="${1:?usage: memcli briefing <project>}"
-    api "$(proj_url "$proj")/briefing" ;;
+    proj="${1:?usage: memcli briefing <project> [key=value…]}"; shift
+    api_get "$(proj_url "$proj")/briefing" "$@" ;;
   overview)
-    if [ -n "${1:-}" ]; then api "$(proj_url "$1")/overview"
-    else api "$SERVER/api/v1/workspaces/$WS/overview"; fi ;;
+    if [ -n "${1:-}" ] && [[ "$1" != *=* ]]; then proj="$1"; shift; api_get "$(proj_url "$proj")/overview" "$@"
+    else api_get "$SERVER/api/v1/workspaces/$WS/overview" "$@"; fi ;;
   handoffs)
-    proj="${1:?usage: memcli handoffs <project> [state]}"
-    if [ -n "${2:-}" ]; then api --get "$(proj_url "$proj")/handoffs" --data-urlencode "state=$2"
-    else api "$(proj_url "$proj")/handoffs"; fi ;;
+    proj="${1:?usage: memcli handoffs <project> [key=value…]}"; shift
+    if [ -n "${1:-}" ] && [[ "$1" != *=* ]]; then set -- "state=$1" "${@:2}"; fi
+    api_get "$(proj_url "$proj")/handoffs" "$@" ;;
   sessions)
-    proj="${1:?usage: memcli sessions <project>}"
-    api "$(proj_url "$proj")/sessions" ;;
+    proj="${1:?usage: memcli sessions <project> [key=value…]}"; shift
+    api_get "$(proj_url "$proj")/sessions" "$@" ;;
   observations)
-    proj="${1:?usage: memcli observations <project> <session-id>}"; sid="${2:?missing session id}"
-    api "$(proj_url "$proj")/sessions/$sid/observations" ;;
+    proj="${1:?usage: memcli observations <project> <session-id> [key=value…]}"; sid="${2:?missing session id}"; shift 2
+    api_get "$(proj_url "$proj")/sessions/$sid/observations" "$@" ;;
   write)
     [ "${MEMCLI_ALLOW_WRITE:-0}" = "1" ] || { echo "memcli: writes disabled (set MEMCLI_ALLOW_WRITE=1 to enable)" >&2; exit 3; }
     command -v ai-memory >/dev/null || { echo "memcli: write requires the ai-memory binary on PATH (memcli help → CLI)" >&2; exit 4; }

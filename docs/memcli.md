@@ -48,9 +48,17 @@ The same `AI_MEMORY_AUTH_TOKEN` bearer works for every access form:
 
 ## Command surface
 
-Read (pure curl): `workspaces`, `projects`, `graph`, `search`, `read`,
-`pages`, `recent`, `briefing`, `overview`, `handoffs` (read-only),
-`sessions`, `observations`, `status` (HTTP ping fallback).
+Read (pure curl): `workspaces`, `projects`, `graph`, `search`, `search-all`
+(global), `msearch` (multi-scope `POST /search`, up to 25 projects), `read`
+(page path URL-encoded), `pages`, `recent`, `briefing`, `overview`,
+`handoffs` (read-only), `sessions`, `observations`, `status` (HTTP ping
+fallback).
+
+Every read command accepts trailing `key=value` pairs passed through verbatim
+as query params, so the full documented option set of each endpoint is
+available — `limit`, `offset`, `include_open`, `order`, `kinds`, `q`,
+`body_max_chars`, `state`, `all_owners` (root-only), etc. Clamps and shapes:
+upstream `docs/frontend-api.md`.
 
 Mutation (delegates to the `ai-memory` binary, gated by env):
 `write` (`MEMCLI_ALLOW_WRITE=1`), `delete` (`MEMCLI_ALLOW_DELETE=1`).
