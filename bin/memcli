@@ -67,6 +67,11 @@ MUTATION (delegated to the `ai-memory` binary; gated via environment)
   memcli write  <project> <path> -        Write a durable page (body via STDIN, first line "# Title").
                                           Requires MEMCLI_ALLOW_WRITE=1 and the root token.
   memcli delete <project> <path>          Delete a page. Requires MEMCLI_ALLOW_DELETE=1 and root token.
+  memcli handoff-note <project> -         Durable "where we left off" note (body via STDIN,
+                                          first line "# Title") at follow-ups/handoff-<UTC>.md.
+                                          Convention substitute: REAL handoffs are MCP-only;
+                                          the next session finds this via recent/search/read.
+                                          Requires MEMCLI_ALLOW_WRITE=1 and the root token.
 
 DIAGNOSTICS
   memcli status                           `ai-memory status` when the binary exists; HTTP ping otherwise.
@@ -166,7 +171,7 @@ json_str() {
   for ((i = 0; i < ${#s}; i++)); do
     c="${s:i:1}"
     case "$c" in
-      '\') out+='\\' ;;
+      "\\") out+="\\\\" ;;
       '"') out+='\"' ;;
       *)
         b=$(printf '%d' "'$c")
@@ -243,6 +248,13 @@ case "$cmd" in
     proj="${1:?usage: memcli write <project> <path> -}"; path="${2:?missing path}"
     AI_MEMORY_AUTH_TOKEN="$(token)" AI_MEMORY_SERVER_URL="$SERVER" \
       ai-memory write-page --workspace "$WS" --project "$proj" --path "$path" --body - ;;
+  handoff-note)
+    [ "${MEMCLI_ALLOW_WRITE:-0}" = "1" ] || { echo "memcli: writes disabled (set MEMCLI_ALLOW_WRITE=1 to enable)" >&2; exit 3; }
+    command -v ai-memory >/dev/null || { echo "memcli: handoff-note requires the ai-memory binary on PATH (memcli help → CLI)" >&2; exit 4; }
+    proj="${1:?usage: memcli handoff-note <project> -}"
+    AI_MEMORY_AUTH_TOKEN="$(token)" AI_MEMORY_SERVER_URL="$SERVER" \
+      ai-memory write-page --workspace "$WS" --project "$proj" \
+        --path "follow-ups/handoff-$(date -u +%Y%m%dT%H%M%SZ).md" --body - ;;
   delete)
     [ "${MEMCLI_ALLOW_DELETE:-0}" = "1" ] || { echo "memcli: deletes disabled (set MEMCLI_ALLOW_DELETE=1 to enable)" >&2; exit 3; }
     command -v ai-memory >/dev/null || { echo "memcli: delete requires the ai-memory binary on PATH (memcli help → CLI)" >&2; exit 4; }

@@ -1,0 +1,26 @@
+name: memcli
+
+# Static checks only — deliberately secret-free. The live suite
+# (scripts/memcli-tests.sh) stays manual until a dedicated revocable
+# read-only credential exists (issue #9); never put the root bearer
+# in this public repo's Actions secrets.
+on:
+  push:
+    branches: [main]
+    paths: ["bin/memcli", "scripts/*.sh", ".github/workflows/memcli.yml"]
+  pull_request:
+    paths: ["bin/memcli", "scripts/*.sh", ".github/workflows/memcli.yml"]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash syntax
+        run: |
+          bash -n bin/memcli
+          bash -n scripts/memcli-tests.sh
+      - name: shellcheck
+        run: shellcheck -S style bin/memcli scripts/memcli-tests.sh
+      - name: help renders without token
+        run: ./bin/memcli help >/dev/null

@@ -109,20 +109,26 @@ gate() { case "$1" in 404) echo proceed ;; 200) echo exists ;; *) echo "blocked:
 # --- fault injection: non-404 preflights must block (read-only, always run) ---
 fi_path="notes/memcli faultprobe $(date +%s)-$$-${RANDOM}.md"
 st=$(AI_MEMORY_AUTH_TOKEN="invalid-token" probe_status "$WS" "$T_PROJECT" "$fi_path")
-[ "$(gate "$st")" = "blocked:401" ] \
-  && ok "fault: bad-token preflight blocks write (status $st)" \
-  || bad "fault: bad-token preflight not blocked (status $st → $(gate "$st"))"
+if [ "$(gate "$st")" = "blocked:401" ]; then
+  ok "fault: bad-token preflight blocks write (status $st)"
+else
+  bad "fault: bad-token preflight not blocked (status $st → $(gate "$st"))"
+fi
 st=$(SERVER="http://127.0.0.1:9" probe_status "$WS" "$T_PROJECT" "$fi_path")
-[ "$(gate "$st")" = "blocked:000" ] \
-  && ok "fault: network-failure preflight blocks write (status $st)" \
-  || bad "fault: network-failure preflight not blocked (status $st → $(gate "$st"))"
+if [ "$(gate "$st")" = "blocked:000" ]; then
+  ok "fault: network-failure preflight blocks write (status $st)"
+else
+  bad "fault: network-failure preflight not blocked (status $st → $(gate "$st"))"
+fi
 # 200 test: discover a real page from T_PROJECT instead of hardcoding one.
 epage=$("$MEMCLI" pages "$T_PROJECT" 2>/dev/null | jq -r '.[0].path // empty')
 if [ -n "$epage" ]; then
   st=$(probe_status "$WS" "$T_PROJECT" "$epage")
-  [ "$(gate "$st")" = "exists" ] \
-    && ok "fault: existing page refused (status $st: $epage)" \
-    || bad "fault: existing page not refused (status $st → $(gate "$st"): $epage)"
+  if [ "$(gate "$st")" = "exists" ]; then
+    ok "fault: existing page refused (status $st: $epage)"
+  else
+    bad "fault: existing page not refused (status $st → $(gate "$st"): $epage)"
+  fi
 else
   skipt "fault: existing page refused (no pages in $T_PROJECT)"
 fi
@@ -193,7 +199,7 @@ if [ "${MEMCLI_ALLOW_WRITE:-0}" = "1" ] && [ "${MEMCLI_ALLOW_DELETE:-0}" = "1" ]
   # rescued by the still-armed EXIT retry.
   run_sig_fault() { # <desc> <SIGNAL> <expected-rc> <fail-first-cleanup 0|1>
     local desc="$1" sig="$2" want="$3" ff="$4"
-    local p="notes/memcli sig-fault $sig-$ff $(date +%s)-$$-${RANDOM}.md"
+    local p; p="notes/memcli sig-fault $sig-$ff $(date +%s)-$$-${RANDOM}.md"
     local pst; pst=$(probe_status "$sws" "$sproj" "$p")
     if [ "$(gate "$pst")" != "proceed" ]; then bad "$desc (preflight status $pst — refusing to write)"; return; fi
     sh -c '
@@ -212,7 +218,8 @@ if [ "${MEMCLI_ALLOW_WRITE:-0}" = "1" ] && [ "${MEMCLI_ALLOW_DELETE:-0}" = "1" ]
       kill -"$sig" $$
       exit 99  # unreachable when the trap fires
     ' _ "$MEMCLI" "$sws" "$sproj" "$p" "$sig" "$ff" >/dev/null 2>&1
-    local rc=$? fst
+    local rc=$?
+    local fst
     fst=$(probe_status "$sws" "$sproj" "$p")
     if [ "$rc" -eq "$want" ] && [ "$fst" = "404" ]; then
       ok "$desc"

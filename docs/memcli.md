@@ -61,7 +61,11 @@ available — `limit`, `offset`, `include_open`, `order`, `kinds`, `q`,
 upstream `docs/frontend-api.md`.
 
 Mutation (delegates to the `ai-memory` binary, gated by env):
-`write` (`MEMCLI_ALLOW_WRITE=1`), `delete` (`MEMCLI_ALLOW_DELETE=1`).
+`write` and `handoff-note` (`MEMCLI_ALLOW_WRITE=1`), `delete`
+(`MEMCLI_ALLOW_DELETE=1`). `handoff-note` writes a durable
+`follow-ups/handoff-<UTC>.md` page as a convention substitute for real
+handoffs (which are MCP-only); the next session finds it via
+`recent`/`search`.
 Both use root-token admin endpoints. Without the binary, memcli's mutation
 subcommands are unavailable — but that is not containment: a bot with a
 shell and the root token can still POST `/admin/write-page` (or any admin
