@@ -43,7 +43,8 @@ DISCOVERY
 SEARCH (FTS5, lexical)
   memcli search <project> "<terms>" [N] [k=v…]   One project. N = limit (1..100, default 5).
   memcli search-all "<terms>" [N]                Global: every workspace/project at once.
-  memcli msearch "<terms>" [limit=N] <p1> [p2…]  Multi-scope POST (≤25 projects, current workspace).
+  memcli msearch "<terms>" [limit=N] <scope…>    Multi-scope POST (≤25). Scope: <project> in the
+                                                 current workspace, or <workspace/project>.
 
 READ
   memcli read    <project> <path>         Full body of one page (path is URL-encoded for you).
@@ -158,8 +159,30 @@ enc_path() {
   printf %s "$out"
 }
 
-# Minimal JSON string escape (backslash + double quote).
-json_str() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$s"; }
+# JSON string escape: backslash, quote, and all control bytes (<0x20).
+json_str() {
+  local s="$1" out='' i c b
+  LC_ALL=C
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      '\') out+='\\' ;;
+      '"') out+='\"' ;;
+      *)
+        b=$(printf '%d' "'$c")
+        if [ "$b" -lt 32 ] && [ "$b" -ge 0 ]; then
+          case "$b" in
+            8) out+='\b' ;; 9) out+='\t' ;; 10) out+='\n' ;;
+            12) out+='\f' ;; 13) out+='\r' ;;
+            *) out+=$(printf '\\u%04X' "$b") ;;
+          esac
+        else
+          out+="$c"
+        fi ;;
+    esac
+  done
+  printf '"%s"' "$out"
+}
 
 cmd="${1:-help}"; shift || true
 case "$cmd" in
@@ -174,13 +197,18 @@ case "$cmd" in
     q="${1:?usage: memcli search-all \"terms\" [N]}"; n="${2:-10}"
     api_get "$SERVER/api/v1/search" "q=$q" "limit=$n" ;;
   msearch)
-    q="${1:?usage: memcli msearch \"terms\" [limit=N] <project1> [project2…]}"; shift
+    q="${1:?usage: memcli msearch \"terms\" [limit=N] <[workspace/]project>…}"; shift
     limit=10; if [[ "${1:-}" == limit=* ]]; then limit="${1#limit=}"; shift; fi
-    [ $# -ge 1 ] || { echo "usage: memcli msearch \"terms\" [limit=N] <project1> [project2…]" >&2; exit 1; }
+    [[ "$limit" =~ ^[0-9]+$ ]] || { echo "memcli: limit must be a positive integer, got '$limit'" >&2; exit 1; }
+    [ $# -ge 1 ] || { echo "usage: memcli msearch \"terms\" [limit=N] <[workspace/]project>…" >&2; exit 1; }
     [ $# -le 25 ] || { echo "memcli: POST /search accepts at most 25 scopes" >&2; exit 1; }
     scopes=''
     for p in "$@"; do
-      scopes+="${scopes:+,}{\"workspace\":$(json_str "$WS"),\"project\":$(json_str "$p")}"
+      case "$p" in
+        */*) sw="${p%%/*}"; sp="${p#*/}" ;;
+        *)   sw="$WS";      sp="$p" ;;
+      esac
+      scopes+="${scopes:+,}{\"workspace\":$(json_str "$sw"),\"project\":$(json_str "$sp")}"
     done
     api -H 'Content-Type: application/json' -X POST "$SERVER/api/v1/search" \
       -d "{\"q\":$(json_str "$q"),\"limit\":$limit,\"scopes\":[$scopes]}" ;;
