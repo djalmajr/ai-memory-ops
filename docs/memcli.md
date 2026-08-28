@@ -54,8 +54,10 @@ Read (pure curl): `workspaces`, `projects`, `graph`, `search`, `read`,
 
 Mutation (delegates to the `ai-memory` binary, gated by env):
 `write` (`MEMCLI_ALLOW_WRITE=1`), `delete` (`MEMCLI_ALLOW_DELETE=1`).
-Both use root-token admin endpoints; without the binary the bot is
-read-only by construction.
+Both use root-token admin endpoints. Without the binary, memcli's mutation
+subcommands are unavailable — but that is not containment: a bot with a
+shell and the root token can still POST `/admin/write-page` (or any admin
+route) with raw curl.
 
 ## The full `ai-memory` CLI — broader operator surface
 
