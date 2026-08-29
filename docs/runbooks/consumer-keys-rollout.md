@@ -107,14 +107,12 @@ compose do servidor:
       # assert them"), então tokens iguais fazem toda identidade traduzida
       # entrar como Root, sem atribuição, em silêncio.
       ACTOR_PROXY_BEARER_TOKEN: ${ACTOR_PROXY_BEARER_TOKEN}
-      # Sondado no servidor: `.env` já tem a chave `ACTOR_PROXY_BEARER_TOKEN`
-      # (não vazia), então esta interpolação resolve. Mas a linha do ENGINE em
-      # `compose.yml` é um LITERAL, não `${...}` — hoje os dois hashes batem
-      # (eb5df7fa…), e rotacionar só o `.env` os separaria em silêncio: toda
-      # chave `amk_` passaria a 401. Ao rotacionar, troque os DOIS, e confira:
-      #   docker compose config | grep -m1 ACTOR_PROXY_BEARER_TOKEN |
-      #     sed 's/.*: *//' | tr -d '"' | sha256sum | cut -c1-12
-      #   printf %s "$ACTOR_PROXY_BEARER_TOKEN" | sha256sum | cut -c1-12
+      # Fonte única: `.env`. Sondado no servidor — a linha do engine é
+      # `AI_MEMORY_AUTH__ACTOR_PROXY_BEARER_TOKEN: ${ACTOR_PROXY_BEARER_TOKEN}`,
+      # interpolação, não literal (o valor não aparece em `compose.yml`; só em
+      # `.env`). Então rotacionar o `.env` basta para os dois serviços — mas
+      # confirme com o check da seção "Conferência de tokens" abaixo, que lê o
+      # compose RESOLVIDO.
       # Sem isto os branches de hook e OIDC ecoam o token do chamador, que não
       # entra no rung de proxy: medido, `POST /hook` devolve 401 (ausente) vs
       # 202 com `actor_user: user:djalmajr` (setado com o token de proxy).
@@ -129,6 +127,48 @@ compose do servidor:
     volumes:
       - mcp-auth-keys:/data
 ```
+
+### Conferência de tokens
+
+Compara os valores **resolvidos por serviço**, em memória, e imprime só o
+veredito — sem valor e sem hash. Fingerprint de segredo vivo não entra em
+arquivo versionado: um prefixo de hash é oráculo de confirmação para um token
+vazado, mesmo sem permitir derivá-lo.
+
+```bash
+cd /opt/ai-memory
+docker compose config --format json | python3 -c '
+import json,sys
+s=json.load(sys.stdin).get("services",{})
+def env(svc,key): return (s.get(svc,{}).get("environment") or {}).get(key)
+pe=env("ai-memory","AI_MEMORY_AUTH__ACTOR_PROXY_BEARER_TOKEN")
+rt=env("ai-memory","AI_MEMORY_AUTH_TOKEN")
+ps=env("mcp-auth","ACTOR_PROXY_BEARER_TOKEN")
+us=env("mcp-auth","UPSTREAM_AUTH_TOKEN")
+print("proxy token no engine :", "presente" if pe else "AUSENTE")
+print("proxy != root         :", "DISTINCT" if pe and pe != rt else "SAME/AUSENTE")
+print("sidecar no compose    :", "sim" if "mcp-auth" in s else "ainda nao")
+print("engine == sidecar     :", ("MATCH" if pe==ps==us else "DIFFER") if (ps or us) else "n/a")
+'
+```
+
+Lê o compose **resolvido**, então cobre literal e `${...}` igualmente, e não
+depende de o `.env` estar exportado no shell (o Compose o usa para interpolação
+sem exportá-lo). Estado em 2026-08-29, antes do sidecar existir:
+`proxy token no engine: presente`, `proxy != root: DISTINCT`,
+`sidecar no compose: ainda nao`.
+
+Depois de adicionar o sidecar, o esperado é `engine == sidecar: MATCH`.
+`DIFFER` significa que toda chave `amk_` vai 401; `SAME` em `proxy != root`
+significa que toda identidade traduzida entra como Root sem atribuição.
+
+Nota de higiene: o commit `223927b` deste repo (público) registrou por engano um
+prefixo de 12 hex do SHA-256 do token de proxy vivo. Já saiu do HEAD. Um
+prefixo de 48 bits **não permite derivar** um bearer aleatório — só confirmaria
+um candidato que o atacante já tivesse — e `grep` no servidor não prova ausência
+de cliente externo com o token, então a rotação **não** é emergencial: ela entra
+na janela do passo 5, junto da rotação do token raiz e do hook. Fingerprint de
+segredo vivo não volta a arquivo versionado.
 
 > **A topologia atual não tem onde pendurar o forwardAuth.** Verificado no
 > servidor: nada escuta em 80/443; o único listener é
