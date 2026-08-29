@@ -60,13 +60,20 @@ import (
 )
 
 var (
-	logger            *slog.Logger
-	jwks              keyfunc.Keyfunc
-	jwtKeyfunc        jwt.Keyfunc
-	jwksReady         bool
-	oidcIssuer        string
-	oidcAud           string
-	upstreamAuthToken string // optional: if set, injects Authorization: Bearer <token> into the upstream after validating the JWT (ai-memory uses a static AI_MEMORY_AUTH_TOKEN and does not validate JWT)
+	logger     *slog.Logger
+	jwks       keyfunc.Keyfunc
+	jwtKeyfunc jwt.Keyfunc
+	jwksReady  bool
+	oidcIssuer string
+	oidcAud    string
+	// Optional: injects Authorization: Bearer <token> into the upstream after
+	// validating the JWT (ai-memory does not validate JWTs). Carry the engine's
+	// DISTINCT trusted-proxy bearer here — `actor_proxy_bearer_token`, the same
+	// value as ACTOR_PROXY_BEARER_TOKEN — never `AI_MEMORY_AUTH_TOKEN`: the
+	// engine tests the root credential first and ignores actor headers on that
+	// rung, so the root token would land every translated identity as Root with
+	// no attribution.
+	upstreamAuthToken string
 	hookAuthToken     string // optional: static bearer for the lifecycle-hook routes only (/hook, /handoff) — see HOOK_AUTH_TOKEN above
 	hookAuthUsername  string // optional: username propagated to the actor headers when hookAuthToken matches
 	httpClient        = &http.Client{Timeout: 10 * time.Second}
