@@ -48,7 +48,9 @@ Traefik calls with headers `X-Forwarded-Method`, `X-Forwarded-Uri`, `X-Forwarded
    client-supplied actor values (`Set`, never `Add`).
 5. JWT parse fails / invalid sig / expired / issuer ≠ `OIDC_ISSUER`?
    If `PASSTHROUGH_UNKNOWN_BEARER=1` and the bearer was not an `amk_` key → **200**
-   without touching `Authorization` (engine rungs still apply; this is how current
+   **echoing** the caller's own `Authorization` — never the upstream token, which
+   would upgrade an unknown bearer to a valid one (engine rungs still apply; this
+   is how current
    CLI tokens keep working during migration). Otherwise → **401**.
 6. `OIDC_AUDIENCE` configured and `aud` claim does not match? → **401**.
 7. Route requires `mcp:write` but claims do not have it? → **403**.
@@ -99,11 +101,37 @@ Follow-up (not in this sidecar): propagate the consumer-key scope into the engin
 | `HOOK_AUTH_USERNAME` | no | `""` | Username propagated as `X-Auth-Username` / `X-Memory-Actor-User` when the hook token matches |
 | `KEYS_DB` | no | `""` (off) | Path to the consumer-keys sqlite file (default in the plan: `/data/keys.db`). Empty → `/keys*` is 404 and `amk_` is not recognised |
 | `ACTOR_PROXY_BEARER_TOKEN` | when `KEYS_DB` is set | — | Injected as `Authorization: Bearer …` after a valid `amk_` key. Boot-fatal if missing while `KEYS_DB` is set. Typically the same value as the engine `AI_MEMORY_AUTH_TOKEN` / `actor_proxy_bearer` |
-| `PASSTHROUGH_UNKNOWN_BEARER` | no | `0` | `1` → bearer that is neither `amk_` nor a valid JWT gets 200 with `Authorization` left untouched (CLI tokens during migration) |
+| `PASSTHROUGH_UNKNOWN_BEARER` | no | `0` | `1` → bearer that is neither `amk_` nor a valid JWT gets 200 with the caller's own `Authorization` **echoed back** (CLI tokens during migration) |
 | `KEYS_ADMIN_SUBJECTS` | no | `""` | Comma-separated `issuer|subject` pairs allowed to manage keys when the realm cannot add `mcp:admin` |
 | `PORT` | no | `8081` | validator HTTP port |
 | `LOG_LEVEL` | no | `info` | `debug` / `info` / `warn` / `error` |
 | `JWKS_REFRESH_SECONDS` | no | `300` | JWKS cache TTL |
+
+### Why every 200 names `Authorization`
+
+A `copy_headers`-style integration treats the listed headers as
+**authoritative**: a header the auth response omits is **removed** from the
+request. Verified with Caddy 2 `forward_auth` — a 200 that carried no
+`Authorization` made the upstream see none at all, so the caller's bearer was
+destroyed and every request 401'd.
+
+"Leave it untouched" only holds for nginx `auth_request`, where the operator
+copies headers by hand. So each 200 states the header explicitly:
+
+| Branch | `Authorization` sent upstream |
+|---|---|
+| public path (`/healthz`, RFC 9728 metadata) | caller's own, echoed — injecting here would credential an unauthenticated caller |
+| static hook token on `/hook`/`/handoff` | `UPSTREAM_AUTH_TOKEN` when set, else the caller's own |
+| valid `amk_` consumer key | `ACTOR_PROXY_BEARER_TOKEN` |
+| unknown bearer with passthrough on | caller's own, echoed — **never** the upstream token |
+| valid OIDC JWT | `UPSTREAM_AUTH_TOKEN` when set, else the caller's own |
+
+Consequence worth planning: the engine honours `X-Memory-Actor-*` **only** on
+its trusted-proxy rung. The hook and JWT branches inject actor headers, so if
+`UPSTREAM_AUTH_TOKEN` is unset their echoed bearer lands on the root/DB rung and
+the engine **ignores** the injected actor. Set
+`UPSTREAM_AUTH_TOKEN=${ACTOR_PROXY_BEARER_TOKEN}` to keep that attribution.
+Passthrough is unaffected — it never injects, by design.
 
 ## Build local
 

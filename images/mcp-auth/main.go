@@ -301,6 +301,9 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 	// Allowlist of unauthenticated paths (k8s probes of the MCP)
 	if isPublicPath(uri) {
 		logger.Debug("verify_public", "uri", uri, "ip", ip)
+		// Echo, never inject: a public path needs no credential, and handing
+		// out the upstream token here would upgrade an unauthenticated caller.
+		echoAuthorization(w, authHeader)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -338,9 +341,7 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Auth-Username", hookAuthUsername)
 			w.Header().Set("X-Memory-Actor-User", hookAuthUsername)
 		}
-		if upstreamAuthToken != "" {
-			w.Header().Set("Authorization", "Bearer "+upstreamAuthToken)
-		}
+		setUpstreamAuthorization(w, authHeader)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -359,6 +360,10 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 				"ip", ip,
 				"elapsed_ms", time.Since(start).Milliseconds(),
 			)
+			// Passthrough means "this bearer is not mine to translate" — echo
+			// it, never inject. Injecting the upstream token here would swap an
+			// UNKNOWN bearer for a valid one: an auth bypass.
+			echoAuthorization(w, authHeader)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -423,13 +428,36 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 		"elapsed_ms", time.Since(start).Milliseconds(),
 	)
 	propagateIdentityHeaders(w, claims)
-	// Injects the static upstream bearer (ai-memory require_bearer) when configured.
-	// Traefik copies this header via authResponseHeaders, swapping the JWT (which ai-memory
-	// does not validate) for the static token it expects. Empty = passes the original Authorization.
+	setUpstreamAuthorization(w, authHeader)
+	w.WriteHeader(http.StatusOK)
+}
+
+// setUpstreamAuthorization writes the Authorization header the upstream must
+// receive for an identity this sidecar has VALIDATED: the configured static
+// token when there is one, otherwise the caller's original header.
+//
+// The echo is not redundant. A `copy_headers`-style integration treats the
+// listed headers as AUTHORITATIVE — a header the auth response omits is
+// REMOVED from the request. Verified with Caddy 2 `forward_auth`: a 200 that
+// does not carry `Authorization` makes the upstream see none at all, so the
+// caller's bearer is destroyed and every request 401s. "Leave it untouched"
+// only holds for nginx `auth_request`, where the operator copies headers by
+// hand; under Caddy and Traefik it must be stated by echoing the value.
+func setUpstreamAuthorization(w http.ResponseWriter, original string) {
 	if upstreamAuthToken != "" {
 		w.Header().Set("Authorization", "Bearer "+upstreamAuthToken)
+		return
 	}
-	w.WriteHeader(http.StatusOK)
+	echoAuthorization(w, original)
+}
+
+// echoAuthorization re-states the caller's own Authorization so a set-or-delete
+// integration keeps it. Used where injecting the upstream token would be a
+// privilege upgrade: public paths and the unknown-bearer passthrough.
+func echoAuthorization(w http.ResponseWriter, original string) {
+	if original != "" {
+		w.Header().Set("Authorization", original)
+	}
 }
 
 func parseJWT(tokenStr string) (jwt.MapClaims, string, error) {

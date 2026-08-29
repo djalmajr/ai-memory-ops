@@ -319,3 +319,96 @@ func TestIsHookPath(t *testing.T) {
 		}
 	}
 }
+
+// Every 200 out of /verify must name the Authorization the upstream should see.
+// A `copy_headers`-style integration (Caddy forward_auth, Traefik
+// authResponseHeaders) DELETES a listed header the auth response omits — so a
+// silent 200 destroys the caller's bearer and the upstream 401s. Verified
+// against Caddy 2: a 200 without Authorization made the upstream see none.
+func TestVerifyAlwaysNamesUpstreamAuthorization(t *testing.T) {
+	t.Run("passthrough echoes the unknown bearer", func(t *testing.T) {
+		oauthEnabled = false
+		hookAuthToken = ""
+		passthroughUnknownBearer = true
+		// Configured on purpose: passthrough must NOT reach for it.
+		upstreamAuthToken = "upstream-static"
+		t.Cleanup(func() {
+			passthroughUnknownBearer = false
+			upstreamAuthToken = ""
+		})
+
+		rec := verifyWith("POST", "/wiki/mcp", "cli-token-nao-migrado")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if got := rec.Header().Get("Authorization"); got != "Bearer cli-token-nao-migrado" {
+			t.Errorf("Authorization = %q, want the caller's own bearer echoed", got)
+		}
+	})
+
+	// Swapping an UNKNOWN bearer for the upstream token would be an auth
+	// bypass: garbage in, valid credential out.
+	t.Run("passthrough never injects the upstream token", func(t *testing.T) {
+		oauthEnabled = false
+		hookAuthToken = ""
+		passthroughUnknownBearer = true
+		upstreamAuthToken = "upstream-static"
+		t.Cleanup(func() {
+			passthroughUnknownBearer = false
+			upstreamAuthToken = ""
+		})
+
+		rec := verifyWith("POST", "/wiki/mcp", "lixo")
+		if got := rec.Header().Get("Authorization"); got == "Bearer upstream-static" {
+			t.Fatal("passthrough injected the upstream token: unknown bearer upgraded to a valid one")
+		}
+	})
+
+	t.Run("hook token echoes when no upstream token is configured", func(t *testing.T) {
+		oauthEnabled = false
+		hookAuthToken = "hook-secret"
+		hookAuthUsername = "djalmajr"
+		upstreamAuthToken = ""
+		t.Cleanup(func() {
+			hookAuthToken = ""
+			hookAuthUsername = ""
+		})
+
+		rec := verifyWith("POST", "/wiki/hook?event=stop&agent=cc", "hook-secret")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if got := rec.Header().Get("Authorization"); got != "Bearer hook-secret" {
+			t.Errorf("Authorization = %q, want the hook bearer echoed", got)
+		}
+	})
+
+	t.Run("public path echoes and never injects", func(t *testing.T) {
+		oauthEnabled = false
+		hookAuthToken = ""
+		upstreamAuthToken = "upstream-static"
+		t.Cleanup(func() { upstreamAuthToken = "" })
+
+		rec := verifyWith("GET", "/wiki/healthz", "qualquer-coisa")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if got := rec.Header().Get("Authorization"); got != "Bearer qualquer-coisa" {
+			t.Errorf("Authorization = %q, want the caller's header echoed, not the upstream token", got)
+		}
+	})
+
+	// No Authorization in, none out — echoing an empty value would forge a
+	// header the caller never sent.
+	t.Run("public path with no bearer sets nothing", func(t *testing.T) {
+		oauthEnabled = false
+		hookAuthToken = ""
+		upstreamAuthToken = "upstream-static"
+		t.Cleanup(func() { upstreamAuthToken = "" })
+
+		rec := verifyWith("GET", "/wiki/healthz", "")
+		if got := rec.Header().Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q, want empty", got)
+		}
+	})
+}

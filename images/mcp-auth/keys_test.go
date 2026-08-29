@@ -347,8 +347,11 @@ func TestPassthroughUnknownBearer(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("passthrough on status = %d, want 200", rec.Code)
 	}
-	if got := rec.Header().Get("Authorization"); got != "" {
-		t.Errorf("Authorization = %q, want untouched (empty on the auth response)", got)
+	// Echoed, NOT omitted. An omitted header is deleted by a `copy_headers`
+	// integration (verified with Caddy 2 forward_auth), which would destroy the
+	// CLI's bearer and 401 every un-migrated client.
+	if got := rec.Header().Get("Authorization"); got != "Bearer cli-static-token" {
+		t.Errorf("Authorization = %q, want the caller's bearer echoed", got)
 	}
 
 	// amk_ still 401s even with passthrough — it is a consumer key, just unknown.
