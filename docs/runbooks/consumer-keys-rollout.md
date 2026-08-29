@@ -139,7 +139,17 @@ compose do servidor:
 		reverse_proxy ai-memory:49374
 	}
 
-	handle {
+	# `route` preserva a ordem do arquivo (fora dele o Caddy reordena
+	# diretivas). Strip explícito ANTES do forward_auth, defesa em
+	# profundidade: se algum dia alguém encurtar o `copy_headers`, os cinco
+	# continuam sendo descartados.
+	route {
+		request_header -X-Memory-Actor-User
+		request_header -X-Memory-Actor-Sub
+		request_header -X-Memory-Actor-Issuer
+		request_header -X-Memory-Actor-Client
+		request_header -X-Memory-Actor-Agent
+
 		forward_auth mcp-auth:8081 {
 			uri /verify
 			copy_headers Authorization X-Memory-Actor-User X-Memory-Actor-Sub X-Memory-Actor-Issuer X-Memory-Actor-Client X-Memory-Actor-Agent
@@ -161,9 +171,13 @@ Caddy 2 contra um upstream de eco:
   `X-Memory-Actor-Agent: forjado-agent` do cliente **chegaram** ao upstream —
   o engine confia nos dois (`auth.rs:1004`), então atribuição de cliente/agente
   ficaria forjável.
-- **Não** adicione `request_header -X-Memory-Actor-*` antes do `forward_auth`:
-  a ordem de diretivas do Caddy não é a ordem do arquivo, o strip roda **depois**
-  do `copy_headers` e o ator verificado chega **vazio** (testado).
+- Dentro de `route`, o strip explícito dos cinco roda antes e **não** derruba o
+  ator verificado (testado). Fora de `route` ele roda **depois** do
+  `copy_headers` e o ator chega **vazio** — se tirar o `route`, tire o strip
+  junto.
+- **Nunca** use o strip curinga `request_header -X-Memory-Actor-*`: ele apaga
+  também o `X-Memory-Actor-Session-Id` legítimo (testado — a sessão do hook
+  desaparece). Enumere os cinco.
 
 `X-Memory-Actor-Session-Id` fica **deliberadamente fora da lista**, e isso não
 é descuido:
@@ -203,16 +217,21 @@ suposto**:
 1. `/{basePath}/keys` e `/{basePath}/keys/*` vão **direto** para o `mcp-auth`.
    Esse caminho **não** pode passar pelo `forwardAuth` do próprio sidecar: ele
    *é* o serviço de auth, e mandá-lo autenticar a si mesmo devolve 401.
-2. `/{basePath}/web*` (documento + assets) **não** passa pelo `forwardAuth`: a
-   sessão da UI é do oauth2-proxy. Com o forwardAuth ligado ali, o browser manda
-   `Authorization: Basic …`, o sidecar não entende e a tela fica em branco com
-   `forwardAuth denied: 401`.
+2. `/{basePath}/web*` (documento + assets) **não** passa pelo `forwardAuth`:
+   quem autentica a UI é o **próprio engine** (Basic com a senha = bearer raiz,
+   depois cookie `ai_memory_auth`). Não há oauth2-proxy nesta topologia. Com o
+   forwardAuth ligado ali, o browser manda `Authorization: Basic …`, o sidecar
+   não entende e a tela fica em branco com `forwardAuth denied: 401`.
 3. O resto (`/mcp`, `/api/v1`, `/admin`, `/hook`, `/handoff`) passa pelo
    `forwardAuth` do `/verify`, que **substitui** o `Authorization` pelo
-   `ACTOR_PROXY_BEARER_TOKEN` e injeta os headers de ator. A borda deve
-   **descartar** qualquer `X-Memory-Actor-*` vindo do cliente antes de chamar o
-   `/verify` — header acumulado faz o engine responder `400 Ambiguous`; par OIDC
-   incompleto responde `400`.
+   `ACTOR_PROXY_BEARER_TOKEN` e injeta os headers de ator. Header acumulado faz
+   o engine responder `400 Ambiguous`; par OIDC incompleto responde `400`.
+
+   A borda descarta os **cinco** headers de ator que o sidecar emite —
+   enumerados, dentro de um `route`, como na config acima. **Não** descarte
+   "qualquer `X-Memory-Actor-*`": o `X-Memory-Actor-Session-Id` é legítimo
+   (vem do hook e do `mcp_bridge`, o sidecar nunca o emite) e um strip curinga
+   o apaga. Ver a seção da config para o porquê e os testes.
 
 ### Credencial do operador no browser (o detalhe que decide se Consumidores funciona)
 
