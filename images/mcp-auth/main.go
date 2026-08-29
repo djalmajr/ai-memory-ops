@@ -14,6 +14,10 @@
 //	GET /healthz   → 200 always (k8s probe)
 //	GET /readyz    → 200 if JWKS was fetched successfully at least once
 //	GET /verify    → 200 (authorized) / 401 (missing/invalid token) / 403 (valid token without role)
+//	GET /keys      → {keys:[]} (KEYS_DB set; 404 when unset)
+//	POST /keys     → 201 plaintext key once
+//	GET /keys/whoami
+//	DELETE /keys/{id} → 204 soft revoke
 //
 // Env vars:
 //
@@ -25,6 +29,12 @@
 //	                     the same token falls through to JWT validation (and fails).
 //	HOOK_AUTH_USERNAME  (optional) — username propagated as X-Auth-Username /
 //	                     X-Memory-Actor-User when the hook token matches.
+//	KEYS_DB             (optional) — sqlite path; empty disables /keys* (404) and amk_ verify
+//	ACTOR_PROXY_BEARER_TOKEN (required when KEYS_DB is set) — injected as Authorization on amk_ success
+//	PASSTHROUGH_UNKNOWN_BEARER (optional, default 0) — 200 without rewriting Authorization when the
+//	                     bearer is neither amk_ nor a valid JWT (keeps CLI tokens working mid-migration)
+//	KEYS_ADMIN_SUBJECTS (optional) — comma-separated issuer|subject pairs allowed to manage keys
+//	                     when the realm cannot add mcp:admin
 //	PORT                (default 8081)
 //	LOG_LEVEL           (default info; debug|info|warn|error)
 //	JWKS_REFRESH_SECONDS (default 300 = 5min)
@@ -52,6 +62,7 @@ import (
 var (
 	logger            *slog.Logger
 	jwks              keyfunc.Keyfunc
+	jwtKeyfunc        jwt.Keyfunc
 	jwksReady         bool
 	oidcIssuer        string
 	oidcAud           string
@@ -106,6 +117,8 @@ func main() {
 		"oauth_resource", oauthResource,
 	)
 
+	initKeys()
+
 	if err := initJWKS(refresh); err != nil {
 		logger.Error("jwks_init_failed", "error", err)
 		os.Exit(1)
@@ -115,6 +128,8 @@ func main() {
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/readyz", handleReadyz)
 	mux.HandleFunc("/verify", handleVerify)
+	mux.HandleFunc("/keys", handleKeys)
+	mux.HandleFunc("/keys/", handleKeys)
 	// RFC 9728 — served directly (dedicated Traefik route, no forwardAuth).
 	mux.HandleFunc("/.well-known/oauth-protected-resource", handleProtectedResourceMetadata)
 
@@ -142,6 +157,7 @@ func initJWKS(refreshSeconds int) error {
 		return err
 	}
 	jwks = k
+	jwtKeyfunc = k.Keyfunc
 	jwksReady = true
 	return nil
 }
@@ -329,31 +345,39 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate JWT
-	if jwks == nil {
-		logger.Error("verify_unauthorized",
-			"reason", "jwks_unavailable",
-			"uri", uri,
-			"ip", ip,
-			"elapsed_ms", time.Since(start).Milliseconds(),
-		)
-		setChallenge(w, r)
-		w.WriteHeader(http.StatusUnauthorized)
+	if verifyConsumerKey(w, tokenStr, method, uri, ip, start) {
 		return
 	}
-	claims := jwt.MapClaims{}
-	token, err := jwt.ParseWithClaims(tokenStr, claims, jwks.Keyfunc,
-		jwt.WithValidMethods([]string{"RS256"}),
-		jwt.WithIssuer(oidcIssuer),
-	)
-	if err != nil || !token.Valid {
-		logger.Info("verify_unauthorized",
-			"reason", "jwt_invalid",
-			"error", err,
-			"uri", uri,
-			"ip", ip,
-			"elapsed_ms", time.Since(start).Milliseconds(),
-		)
+
+	claims, reason, err := parseJWT(tokenStr)
+	if err != nil {
+		if passthroughUnknownBearer {
+			logger.Info("verify_ok",
+				"mode", "passthrough",
+				"method", method,
+				"uri", uri,
+				"ip", ip,
+				"elapsed_ms", time.Since(start).Milliseconds(),
+			)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if reason == "jwks_unavailable" {
+			logger.Error("verify_unauthorized",
+				"reason", reason,
+				"uri", uri,
+				"ip", ip,
+				"elapsed_ms", time.Since(start).Milliseconds(),
+			)
+		} else {
+			logger.Info("verify_unauthorized",
+				"reason", reason,
+				"error", err,
+				"uri", uri,
+				"ip", ip,
+				"elapsed_ms", time.Since(start).Milliseconds(),
+			)
+		}
 		setChallenge(w, r)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -406,6 +430,24 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Authorization", "Bearer "+upstreamAuthToken)
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func parseJWT(tokenStr string) (jwt.MapClaims, string, error) {
+	if jwtKeyfunc == nil {
+		return nil, "jwks_unavailable", errors.New("jwks unavailable")
+	}
+	claims := jwt.MapClaims{}
+	token, err := jwt.ParseWithClaims(tokenStr, claims, jwtKeyfunc,
+		jwt.WithValidMethods([]string{"RS256"}),
+		jwt.WithIssuer(oidcIssuer),
+	)
+	if err != nil || !token.Valid {
+		if err == nil {
+			err = errors.New("jwt invalid")
+		}
+		return nil, "jwt_invalid", err
+	}
+	return claims, "", nil
 }
 
 func propagateIdentityHeaders(w http.ResponseWriter, claims jwt.MapClaims) {

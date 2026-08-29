@@ -9,6 +9,7 @@ JWT validator sidecar for **Traefik forwardAuth** — protects the MCP server HT
 | Go | 1.23 | LTS, static build, no CGO |
 | `golang-jwt/jwt/v5` | ^5.2 | JWT parse + validation (RS256) |
 | `MicahParks/keyfunc/v3` | ^3.3 | JWKS fetcher with auto-refresh cache |
+| `modernc.org/sqlite` | v1.38.2 | Pure-Go sqlite (`CGO_ENABLED=0`, scratch). Pinned below Go 1.24+. |
 | Base runtime | `scratch` | ~5-7 MB image, no libc/sh |
 | Binary user | UID 65532 (nonroot) | No privileges |
 
@@ -18,7 +19,15 @@ JWT validator sidecar for **Traefik forwardAuth** — protects the MCP server HT
 |---|---|---|---|
 | `GET /healthz` | none | 200 always | k8s liveness probe |
 | `GET /readyz` | none | 200 if JWKS already loaded, 503 otherwise | k8s readiness probe |
-| `GET /verify` | bearer JWT | 200/401/403 | Traefik forwardAuth endpoint |
+| `GET /verify` | bearer JWT / `amk_` / hook | 200/401/403 | Traefik forwardAuth endpoint |
+| `GET /keys` | identified + `mcp:admin` | `{ "keys": ConsumerKey[] }` | 404 when `KEYS_DB` unset |
+| `POST /keys` | identified + `mcp:admin` | 201 `ConsumerKey` + plaintext `key` once | owner derived from caller, never the body |
+| `GET /keys/whoami` | any | `{ "identity": KeyOwner\|null, "can_issue": bool }` | fail-closed UI field; 404 when unset |
+| `DELETE /keys/{id}` | identified + `mcp:admin` | 204 | idempotent soft revoke |
+
+**Routing:** this sidecar now serves `/keys*`, but the edge does **not** route that prefix today (helm does not map it; production compose is server-only). The SPA same-origin path `${basePath}/keys` only works after the edge forwards `/keys*` here. No CORS layer — the UI is same-origin behind that edge.
+
+**Privilege to issue/manage:** a JWT with realm role `mcp:admin` (create it in Keycloak), or an `amk_` key with scope `admin`. If the realm cannot gain a new role, set `KEYS_ADMIN_SUBJECTS` to a comma-separated list of `issuer|subject` pairs. Hook token and anonymous callers get `403 {"error":"issuance requires an identified operator"}`.
 
 ### `/verify` — flow
 
@@ -30,10 +39,20 @@ Traefik calls with headers `X-Forwarded-Method`, `X-Forwarded-Uri`, `X-Forwarded
    (constant-time)? → **200** with `X-Memory-Actor-User`/`X-Auth-Username` from
    `HOOK_AUTH_USERNAME` and the upstream bearer injected. Anywhere else the same
    token falls through to JWT validation below (and fails).
-4. JWT parse fails / invalid sig / expired / issuer ≠ `OIDC_ISSUER`? → **401**.
-5. `OIDC_AUDIENCE` configured and `aud` claim does not match? → **401**.
-6. Route requires `mcp:write` but claims do not have it? → **403**.
-7. OK → useful response headers (`X-Auth-Email`, `X-Auth-Username`,
+4. Bearer starts with `amk_` and `KEYS_DB` is set? Look up `sha256(secret)`.
+   Unknown / revoked / expired → **401**. Scope too low for the route → **403**.
+   OK → **200** with `Authorization: Bearer ${ACTOR_PROXY_BEARER_TOKEN}` and
+   `X-Memory-Actor-User: <actor_user>`. `X-Memory-Actor-Issuer` + `X-Memory-Actor-Sub`
+   are sent **only** when the key has scope `admin` and its owner `kind=subject`
+   (both values, never a partial pair — the engine 400s otherwise). Headers **replace**
+   client-supplied actor values (`Set`, never `Add`).
+5. JWT parse fails / invalid sig / expired / issuer ≠ `OIDC_ISSUER`?
+   If `PASSTHROUGH_UNKNOWN_BEARER=1` and the bearer was not an `amk_` key → **200**
+   without touching `Authorization` (engine rungs still apply; this is how current
+   CLI tokens keep working during migration). Otherwise → **401**.
+6. `OIDC_AUDIENCE` configured and `aud` claim does not match? → **401**.
+7. Route requires `mcp:write` but claims do not have it? → **403**.
+8. OK → useful response headers (`X-Auth-Email`, `X-Auth-Username`,
    `X-Auth-Sub`, `X-Memory-Actor-User`, `X-Memory-Actor-Sub`,
    `X-Memory-Actor-Client`, `X-Memory-Actor-Agent`) → **200**.
 
@@ -54,6 +73,22 @@ DELETE|PUT|PATCH /wiki/mcp/...    → mcp:write
 
 Conservative: everything is `mcp:read` until proven otherwise; explicit write routes are opt-in.
 
+### Consumer keys (`amk_`)
+
+Opt-in via `KEYS_DB`. Secret format: `amk_` + 40 hex chars from `crypto/rand` (160 bits). Only `sha256(secret)` hex and the last 4 chars are stored.
+
+SHA-256 rather than argon2/bcrypt (the original issue text): the secret is full-entropy CSPRNG, not a user-chosen password; `/verify` needs an indexable O(1) lookup on every request; the engine already hashes `users.token_hash` with SHA-256.
+
+Scope × route:
+
+- `read` — real HTTP GET/HEAD (`/api/v1/*`, `/web/*`, …). Scope `read` covers HTTP reads; MCP access requires `write` because the JSON-RPC endpoint multiplexes read and write and forwardAuth does not see the tool name.
+- `write` — everything in `read`, plus any MCP call (`POST /mcp`), `/hook`, `/handoff`, and other mutating methods (`PUT`/`DELETE`/`PATCH`)
+- `admin` — everything in `write`, plus engine `/admin/` paths (not `/mcp/admin/`)
+
+Follow-up (not in this sidecar): propagate the consumer-key scope into the engine and enforce per tool/capability there. Parsing JSON-RPC in forwardAuth is not an option — the hop does not get a reliable body.
+
+`POST /keys` body: `{id, actor_user, scopes[], expires_at?}`. `id` matches `^[a-z0-9][a-z0-9-]{1,63}$`. A body that carries any `owner*` field is **400** — owner is always `callerIdentity` (JWT subject, or the issuing `amk_` key's stored owner).
+
 ## Env vars
 
 | Variable | Required | Default | Description |
@@ -62,6 +97,10 @@ Conservative: everything is `mcp:read` until proven otherwise; explicit write ro
 | `OIDC_AUDIENCE` | no | `""` (not checked) | If set, requires the `aud` claim in the JWT |
 | `HOOK_AUTH_TOKEN` | no | `""` (off) | Static bearer accepted ONLY on `/hook` and `/handoff` (agent lifecycle hooks are headless — no interactive OAuth). Constant-time compare |
 | `HOOK_AUTH_USERNAME` | no | `""` | Username propagated as `X-Auth-Username` / `X-Memory-Actor-User` when the hook token matches |
+| `KEYS_DB` | no | `""` (off) | Path to the consumer-keys sqlite file (default in the plan: `/data/keys.db`). Empty → `/keys*` is 404 and `amk_` is not recognised |
+| `ACTOR_PROXY_BEARER_TOKEN` | when `KEYS_DB` is set | — | Injected as `Authorization: Bearer …` after a valid `amk_` key. Boot-fatal if missing while `KEYS_DB` is set. Typically the same value as the engine `AI_MEMORY_AUTH_TOKEN` / `actor_proxy_bearer` |
+| `PASSTHROUGH_UNKNOWN_BEARER` | no | `0` | `1` → bearer that is neither `amk_` nor a valid JWT gets 200 with `Authorization` left untouched (CLI tokens during migration) |
+| `KEYS_ADMIN_SUBJECTS` | no | `""` | Comma-separated `issuer|subject` pairs allowed to manage keys when the realm cannot add `mcp:admin` |
 | `PORT` | no | `8081` | validator HTTP port |
 | `LOG_LEVEL` | no | `info` | `debug` / `info` / `warn` / `error` |
 | `JWKS_REFRESH_SECONDS` | no | `300` | JWKS cache TTL |
