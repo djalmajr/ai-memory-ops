@@ -139,6 +139,35 @@ compose do servidor:
 		reverse_proxy ai-memory:49374
 	}
 
+	# Metadata RFC 9728: quem serve é o SIDECAR (`main.go:134`); o engine não
+	# tem esse path (zero ocorrências). Sem esta rota o request cai no
+	# catch-all, o /verify libera como público e o Caddy manda ao engine → 404,
+	# matando a descoberta de IdP que a SPA faz em `api.ts:39`.
+	handle /.well-known/oauth-protected-resource {
+		reverse_proxy mcp-auth:8081
+	}
+
+	# Sessão só-cookie: a SPA no degrau `cookie-admin` não guarda chave, então
+	# não manda `Authorization` — e o sidecar 401 qualquer request sem Bearer,
+	# antes do engine. Quem sabe validar esse cookie é o engine, que o emitiu.
+	# Restrito a GET/HEAD: o engine já recusa mutação por cookie, e aqui a
+	# recusa acontece uma camada antes.
+	@cookie_only {
+		not header Authorization *
+		header Cookie *ai_memory_auth=*
+		method GET HEAD
+	}
+	handle @cookie_only {
+		route {
+			request_header -X-Memory-Actor-User
+			request_header -X-Memory-Actor-Sub
+			request_header -X-Memory-Actor-Issuer
+			request_header -X-Memory-Actor-Client
+			request_header -X-Memory-Actor-Agent
+			reverse_proxy ai-memory:49374
+		}
+	}
+
 	# Catch-all como `handle` (fica no grupo de exclusão mútua dos handles
 	# acima), com `route` DENTRO dele — `route` é outra diretiva, e um `route`
 	# no topo dependeria de o `reverse_proxy` dos handles ser terminal para não
@@ -226,13 +255,39 @@ Corte com risco baixo: subir Caddy + mcp-auth numa porta paralela
 suíte `live.spec.ts` apontada para `http://127.0.0.1:8080/web`, e só então
 reapontar o `cloudflared`. Rollback = reapontar o túnel de volta.
 
+Esta config foi exercitada com a cadeia inteira local — Caddy 2 + `mcp-auth`
+compilado do fonte + engine 1.32.2 real servindo a SPA — e o Caddyfile do teste
+saiu **deste bloco**, só trocando os alvos. Resultado:
+
+| Request | Quem respondeu |
+|---|---|
+| `/.well-known/oauth-protected-resource` | sidecar, metadata real |
+| `/keys` sem credencial | sidecar |
+| `/web/` com Basic | engine, 200 + cookie |
+| `GET /api/v1/workspaces` só cookie | engine, 200 |
+| `POST /admin/commit` só cookie | 401 |
+| `GET /api/v1/workspaces` com bearer | engine, 200 |
+| `GET` sem cookie e sem bearer | 401 |
+
+O log do sidecar mostrou subrequest de `/verify` **só** para `/admin/commit` e
+`/api/v1/workspaces`. A suíte `e2e/live.spec.ts` passou inteira (4/4, incluindo
+"sessão só-cookie vê as telas e não oferece mutação") apontada para a porta do
+Caddy em vez do engine.
+
 Antes do corte, repetir contra a porta nova:
 
 1. os cinco headers forjados (um a um e combinados) chegam só com valor
    verificado;
 2. um `/hook` com `X-Memory-Actor-Session-Id` preserva a sessão;
-3. `/keys*` e `/web*` não aparecem no log do `mcp-auth` como subrequest de
-   `/verify` — se aparecerem, o catch-all deixou de ser mutuamente exclusivo.
+3. `/keys*`, `/web*` e `/.well-known/oauth-protected-resource` não aparecem no
+   log do `mcp-auth` como subrequest de `/verify` — se aparecerem, o catch-all
+   deixou de ser mutuamente exclusivo;
+4. `/.well-known/oauth-protected-resource` responde metadata (vem do sidecar),
+   não 404 (que seria o engine);
+5. Basic no `/web` → `GET /api/v1/...` só com cookie devolve 200 e
+   `POST /admin/...` só com cookie devolve 401;
+6. `E2E_BASE_URL=http://127.0.0.1:8080/web npx playwright test e2e/live.spec.ts`
+   passa 4/4.
 
 O volume nomeado pode entrar vazio: a imagem provisiona `/data` já com dono
 `65532:65532`, e um volume novo herda dono e modo do diretório que existe na
