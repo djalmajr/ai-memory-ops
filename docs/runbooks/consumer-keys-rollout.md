@@ -100,10 +100,24 @@ compose do servidor:
     environment:
       OIDC_ISSUER: https://<keycloak>/realms/memory
       KEYS_DB: /data/keys.db
-      # MESMO valor já em AI_MEMORY_AUTH__ACTOR_PROXY_BEARER_TOKEN no engine.
+      # MESMO valor já em AI_MEMORY_AUTH__ACTOR_PROXY_BEARER_TOKEN no engine —
+      # e OBRIGATORIAMENTE distinto de AI_MEMORY_AUTH_TOKEN. O engine testa o
+      # root ANTES do proxy (`auth.rs:329-331`: "Actor assertion headers are
+      # intentionally ignored here; only the distinct proxy credential may
+      # assert them"), então tokens iguais fazem toda identidade traduzida
+      # entrar como Root, sem atribuição, em silêncio.
       ACTOR_PROXY_BEARER_TOKEN: ${ACTOR_PROXY_BEARER_TOKEN}
+      # Sem isto os branches de hook e OIDC ecoam o token do chamador, que não
+      # entra no rung de proxy: medido, `POST /hook` devolve 401 (ausente) vs
+      # 202 com `actor_user: user:djalmajr` (setado com o token de proxy).
+      UPSTREAM_AUTH_TOKEN: ${ACTOR_PROXY_BEARER_TOKEN}
       # Mantém os CLIs atuais funcionando durante a migração (passo 5).
       PASSTHROUGH_UNKNOWN_BEARER: "1"
+      # OAuth/DCR desligado: o handler de metadata RFC 9728 responde 404 até
+      # OAUTH_ENABLED=true. A rota do Caddy existe de qualquer forma, para o
+      # 404 vir do sidecar (quem serve o endpoint) e não do engine.
+      # OAUTH_ENABLED: "true"
+      # OAUTH_RESOURCE: https://memory.djalmajr.dev
     volumes:
       - mcp-auth-keys:/data
 ```
@@ -282,11 +296,19 @@ Antes do corte, repetir contra a porta nova:
 3. `/keys*`, `/web*` e `/.well-known/oauth-protected-resource` não aparecem no
    log do `mcp-auth` como subrequest de `/verify` — se aparecerem, o catch-all
    deixou de ser mutuamente exclusivo;
-4. `/.well-known/oauth-protected-resource` responde metadata (vem do sidecar),
-   não 404 (que seria o engine);
-5. Basic no `/web` → `GET /api/v1/...` só com cookie devolve 200 e
+4. `/.well-known/oauth-protected-resource` é respondido pelo **sidecar**. Com
+   OAuth desligado (o caso hoje) ele devolve `404 page not found` — o 404 do
+   Go, com corpo. O engine devolve 404 de **corpo vazio**. É o corpo que
+   discrimina, não o status: `curl -s <base>/.well-known/oauth-protected-resource`
+   tem de imprimir `404 page not found`. Com `OAUTH_ENABLED=true`, vira 200 com
+   o JSON de metadata;
+5. `POST /hook` com o token de hook devolve **202** e a sessão registra
+   `actor_user` (medido: `user:djalmajr`). Se vier 401, falta
+   `UPSTREAM_AUTH_TOKEN`; se vier 202 com `actor_user` vazio, ele está igual ao
+   `AI_MEMORY_AUTH_TOKEN` e caiu no rung root;
+6. Basic no `/web` → `GET /api/v1/...` só com cookie devolve 200 e
    `POST /admin/...` só com cookie devolve 401;
-6. `E2E_BASE_URL=http://127.0.0.1:8080/web npx playwright test e2e/live.spec.ts`
+7. `E2E_BASE_URL=http://127.0.0.1:8080/web npx playwright test e2e/live.spec.ts`
    passa 4/4.
 
 O volume nomeado pode entrar vazio: a imagem provisiona `/data` já com dono

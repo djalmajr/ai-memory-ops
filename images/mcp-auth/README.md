@@ -100,8 +100,9 @@ Follow-up (not in this sidecar): propagate the consumer-key scope into the engin
 | `HOOK_AUTH_TOKEN` | no | `""` (off) | Static bearer accepted ONLY on `/hook` and `/handoff` (agent lifecycle hooks are headless — no interactive OAuth). Constant-time compare |
 | `HOOK_AUTH_USERNAME` | no | `""` | Username propagated as `X-Auth-Username` / `X-Memory-Actor-User` when the hook token matches |
 | `KEYS_DB` | no | `""` (off) | Path to the consumer-keys sqlite file (default in the plan: `/data/keys.db`). Empty → `/keys*` is 404 and `amk_` is not recognised |
-| `ACTOR_PROXY_BEARER_TOKEN` | when `KEYS_DB` is set | — | Injected as `Authorization: Bearer …` after a valid `amk_` key. Boot-fatal if missing while `KEYS_DB` is set. Typically the same value as the engine `AI_MEMORY_AUTH_TOKEN` / `actor_proxy_bearer` |
+| `ACTOR_PROXY_BEARER_TOKEN` | when `KEYS_DB` is set | — | Injected as `Authorization: Bearer …` after a valid `amk_` key. Boot-fatal if missing while `KEYS_DB` is set. Must equal the engine's `actor_proxy_bearer_token` and be **DISTINCT** from `AI_MEMORY_AUTH_TOKEN` — see below |
 | `PASSTHROUGH_UNKNOWN_BEARER` | no | `0` | `1` → bearer that is neither `amk_` nor a valid JWT gets 200 with the caller's own `Authorization` **echoed back** (CLI tokens during migration) |
+| `UPSTREAM_AUTH_TOKEN` | no | `""` | Static bearer injected on the hook and OIDC branches, replacing the caller's. Unset → those branches echo the caller's own token, which does **not** enter the engine's trusted-proxy rung. Set it to the same value as `ACTOR_PROXY_BEARER_TOKEN` |
 | `KEYS_ADMIN_SUBJECTS` | no | `""` | Comma-separated `issuer|subject` pairs allowed to manage keys when the realm cannot add `mcp:admin` |
 | `PORT` | no | `8081` | validator HTTP port |
 | `LOG_LEVEL` | no | `info` | `debug` / `info` / `warn` / `error` |
@@ -126,11 +127,29 @@ copies headers by hand. So each 200 states the header explicitly:
 | unknown bearer with passthrough on | caller's own, echoed — **never** the upstream token |
 | valid OIDC JWT | `UPSTREAM_AUTH_TOKEN` when set, else the caller's own |
 
-Consequence worth planning: the engine honours `X-Memory-Actor-*` **only** on
-its trusted-proxy rung. The hook and JWT branches inject actor headers, so if
-`UPSTREAM_AUTH_TOKEN` is unset their echoed bearer lands on the root/DB rung and
-the engine **ignores** the injected actor. Set
-`UPSTREAM_AUTH_TOKEN=${ACTOR_PROXY_BEARER_TOKEN}` to keep that attribution.
+### The proxy token must be DISTINCT from the engine's root token
+
+The engine honours `X-Memory-Actor-*` **only** on its trusted-proxy rung, and it
+tests the root credential **first**: *"Rung 1: root credential. Actor assertion
+headers are intentionally ignored here; only the distinct proxy credential may
+assert them."* (`auth.rs:329-331`). So if the proxy token equals
+`AI_MEMORY_AUTH_TOKEN`, root matches first and every translated identity lands as
+**Root with no attribution** — silently.
+
+Measured through the full chain (Caddy + this sidecar + a real engine), firing
+`POST /hook` with the static hook token:
+
+| sidecar `UPSTREAM_AUTH_TOKEN` | hook | `actor_user` recorded |
+|---|---|---|
+| unset | **401** | no session created |
+| `proxytoken` (engine's `actor_proxy_bearer_token`) | 202 | `user:djalmajr` |
+| `devtoken` (engine's `bearer_token`) | 202 | **empty — attribution lost** |
+
+Rule: `ACTOR_PROXY_BEARER_TOKEN` and `UPSTREAM_AUTH_TOKEN` carry the **same
+proxy token**, and that token is **never** the engine's `bearer_token`. The
+engine's own config template says the same thing beside
+`actor_proxy_bearer_token`.
+
 Passthrough is unaffected — it never injects, by design.
 
 ## Build local
