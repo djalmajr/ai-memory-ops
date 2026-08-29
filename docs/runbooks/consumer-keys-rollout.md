@@ -428,11 +428,13 @@ issuer/sub, o engine concede apenas `User` e `/admin/*` responde 403 — a tela
 administrativa desaparece. Uma chave de operador com owner `user` serve para
 gerir chaves, não para administrar o engine.
 
-Alternativa sem chave de operador: a borda encaminha o **access token OIDC** do
-operador para `/keys*` (o sidecar valida o JWT e exige a realm role
-`mcp:admin`), e o operador cola o bearer raiz do engine na UI para as chamadas
-administrativas. São duas credenciais em vez de uma — funciona, mas o rodapé da
-sidebar passa a mostrar a chave do engine, não a identidade OIDC.
+A alternativa de encaminhar o **access token OIDC** do operador para `/keys*`
+(sidecar valida o JWT e exige a realm role `mcp:admin`) **não existe neste
+host**: sem provedor no ar não há JWT para validar, e em `mode: keys-only` o
+ramo JWT falha fechado por construção. Ela volta a valer se o Keycloak for
+implantado. Até então, a credencial do operador é uma chave `amk_` com escopo
+`admin` — e o `owner_kind` dela decide se abre `Usuários` (ver os caminhos A e B
+no bootstrap abaixo).
 
 ### Bootstrap da primeira chave
 
