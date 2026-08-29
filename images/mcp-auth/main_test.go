@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -411,4 +412,47 @@ func TestVerifyAlwaysNamesUpstreamAuthorization(t *testing.T) {
 			t.Errorf("Authorization = %q, want empty", got)
 		}
 	})
+}
+
+// Keys-only skips JWKS on purpose, so readiness must key off the store instead
+// of `jwksReady` — otherwise /readyz sits at 503 forever and "it booted" never
+// becomes "it is ready".
+func TestReadyzPerMode(t *testing.T) {
+	cases := []struct {
+		name     string
+		keysOnly bool
+		store    bool
+		jwks     bool
+		want     int
+	}{
+		{"keys-only with store", true, true, false, http.StatusOK},
+		{"keys-only without store", true, false, false, http.StatusServiceUnavailable},
+		{"oidc with jwks", false, false, true, http.StatusOK},
+		{"oidc without jwks", false, false, false, http.StatusServiceUnavailable},
+		// A keys-only store must not paper over a broken JWKS on an OIDC instance.
+		{"oidc with store but no jwks", false, true, false, http.StatusServiceUnavailable},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			keysOnlyMode = c.keysOnly
+			jwksReady = c.jwks
+			if c.store {
+				store, err := openKeysStore(filepath.Join(t.TempDir(), "keys.db"))
+				if err != nil {
+					t.Fatalf("openKeysStore: %v", err)
+				}
+				consumerKeys = store
+				t.Cleanup(func() { _ = store.close(); consumerKeys = nil })
+			} else {
+				consumerKeys = nil
+			}
+			t.Cleanup(func() { keysOnlyMode = false; jwksReady = false })
+
+			rec := httptest.NewRecorder()
+			handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			if rec.Code != c.want {
+				t.Errorf("status = %d, want %d", rec.Code, c.want)
+			}
+		})
+	}
 }

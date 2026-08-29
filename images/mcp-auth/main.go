@@ -64,8 +64,11 @@ var (
 	jwks       keyfunc.Keyfunc
 	jwtKeyfunc jwt.Keyfunc
 	jwksReady  bool
-	oidcIssuer string
-	oidcAud    string
+	// No OIDC_ISSUER configured: this instance validates `amk_` consumer keys
+	// only. JWKS is never fetched, so readiness keys off the store instead.
+	keysOnlyMode bool
+	oidcIssuer   string
+	oidcAud      string
 	// Optional: injects Authorization: Bearer <token> into the upstream after
 	// validating the JWT (ai-memory does not validate JWTs). Carry the engine's
 	// DISTINCT trusted-proxy bearer here — `actor_proxy_bearer_token`, the same
@@ -90,7 +93,7 @@ var (
 
 func main() {
 	port := envOr("PORT", "8081")
-	oidcIssuer = strings.TrimRight(envRequired("OIDC_ISSUER"), "/")
+	oidcIssuer = strings.TrimRight(os.Getenv("OIDC_ISSUER"), "/")
 	oidcAud = os.Getenv("OIDC_AUDIENCE")                 // optional
 	upstreamAuthToken = os.Getenv("UPSTREAM_AUTH_TOKEN") // optional: static token injected into the upstream
 	hookAuthToken = os.Getenv("HOOK_AUTH_TOKEN")         // optional: static bearer for /hook and /handoff only
@@ -98,7 +101,7 @@ func main() {
 	refresh := envIntOr("JWKS_REFRESH_SECONDS", 300)
 
 	// OAuth protected resource. Opt-in via OAUTH_ENABLED=true.
-	oauthEnabled = strings.EqualFold(os.Getenv("OAUTH_ENABLED"), "true")
+	oauthEnabled = strings.EqualFold(os.Getenv("OAUTH_ENABLED"), "true") && oidcIssuer != ""
 	oauthResource = strings.TrimRight(os.Getenv("OAUTH_RESOURCE"), "/")
 	oauthMetadataURL = strings.TrimRight(os.Getenv("OAUTH_RESOURCE_METADATA_URL"), "/")
 	// `profile` and `offline_access` are part of the default set so:
@@ -113,8 +116,15 @@ func main() {
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
 
+	// Keys-only mode: a deployment whose whole job is per-consumer `amk_` keys
+	// needs no identity provider. `amk_` is resolved locally against KEYS_DB and
+	// an admin key issues other keys, so requiring an issuer would block the
+	// install on a Keycloak it never calls.
+	keysOnlyMode = oidcIssuer == ""
+
 	logger.Info("startup",
 		"port", port,
+		"mode", map[bool]string{true: "keys-only", false: "oidc"}[keysOnlyMode],
 		"oidc_issuer", oidcIssuer,
 		"oidc_audience", oidcAud,
 		"upstream_token_inject", upstreamAuthToken != "",
@@ -126,9 +136,22 @@ func main() {
 
 	initKeys()
 
-	if err := initJWKS(refresh); err != nil {
-		logger.Error("jwks_init_failed", "error", err)
+	// Without either an issuer or a key store there is nothing to validate, and
+	// the sidecar could only pass or refuse blindly. That stays fatal.
+	if keysOnlyMode && consumerKeys == nil {
+		logger.Error("boot_config_invalid",
+			"reason", "neither OIDC_ISSUER nor KEYS_DB is set: nothing to validate")
 		os.Exit(1)
+	}
+
+	// No issuer → no JWKS. The JWT branch then fails closed on every request
+	// (`parseJWT` reports `jwks_unavailable` while `jwtKeyfunc` is nil), which
+	// is the honest outcome: this instance cannot verify a JWT.
+	if !keysOnlyMode {
+		if err := initJWKS(refresh); err != nil {
+			logger.Error("jwks_init_failed", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -196,7 +219,16 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleReadyz(w http.ResponseWriter, r *http.Request) {
-	if !jwksReady {
+	// Readiness = the thing this instance actually validates is loaded. In
+	// keys-only mode JWKS is deliberately never fetched, so gating on it would
+	// pin /readyz at 503 forever. Both arms stay strict: a keys-only instance
+	// needs its store, an OIDC instance needs its JWKS.
+	if keysOnlyMode {
+		if consumerKeys == nil {
+			http.Error(w, `{"status":"not-ready","reason":"keys-store-not-open"}`, http.StatusServiceUnavailable)
+			return
+		}
+	} else if !jwksReady {
 		http.Error(w, `{"status":"not-ready","reason":"jwks-not-fetched"}`, http.StatusServiceUnavailable)
 		return
 	}

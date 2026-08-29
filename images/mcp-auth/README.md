@@ -95,7 +95,7 @@ Follow-up (not in this sidecar): propagate the consumer-key scope into the engin
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `OIDC_ISSUER` | **yes** | — | `https://keycloak.example.com/realms/ai-memory-svc` (lab) |
+| `OIDC_ISSUER` | unless `KEYS_DB` is set | — | `https://keycloak.example.com/realms/ai-memory-svc` (lab). Empty + `KEYS_DB` set → **keys-only mode** (see below). Empty with no `KEYS_DB` is boot-fatal: nothing to validate |
 | `OIDC_AUDIENCE` | no | `""` (not checked) | If set, requires the `aud` claim in the JWT |
 | `HOOK_AUTH_TOKEN` | no | `""` (off) | Static bearer accepted ONLY on `/hook` and `/handoff` (agent lifecycle hooks are headless — no interactive OAuth). Constant-time compare |
 | `HOOK_AUTH_USERNAME` | no | `""` | Username propagated as `X-Auth-Username` / `X-Memory-Actor-User` when the hook token matches |
@@ -107,6 +107,42 @@ Follow-up (not in this sidecar): propagate the consumer-key scope into the engin
 | `PORT` | no | `8081` | validator HTTP port |
 | `LOG_LEVEL` | no | `info` | `debug` / `info` / `warn` / `error` |
 | `JWKS_REFRESH_SECONDS` | no | `300` | JWKS cache TTL |
+
+### Keys-only mode (no identity provider)
+
+A deployment whose job is per-consumer `amk_` keys needs no Keycloak. An `amk_`
+key is resolved **locally** against `KEYS_DB` (`keys.go:607-616`) and a key with
+scope `admin` can issue and revoke others, so an issuer would only gate an
+install on a provider the sidecar never calls.
+
+Leave `OIDC_ISSUER` empty with `KEYS_DB` set: JWKS init is skipped, the JWT
+branch fails closed on every request (`parseJWT` reports `jwks_unavailable`
+while `jwtKeyfunc` is nil), and `OAUTH_ENABLED` is forced off — the RFC 9728
+metadata has no issuer to advertise. Boot logs `mode: keys-only`.
+
+In this mode `KEYS_ADMIN_SUBJECTS` and the `mcp:admin` realm role are
+inapplicable (both are issuer/subject based). Bootstrap the first admin key with
+SQL, from **inside** the container or a container sharing the volume — never
+with a host `sqlite3` against a bind mount while the sidecar holds the file
+(WAL across a macOS bind mount gives `disk I/O error (1034)`).
+
+Exercised with no provider running at all:
+
+| Request | Result |
+|---|---|
+| `POST /keys` with no credential | 403, `can_issue:false` |
+| `GET /keys/whoami` with the admin key | `can_issue:true`, owner `djalmajr` (kind `user`) |
+| `POST /keys` with the admin key | key issued, owner **derived** from the caller |
+| `/verify` read-only key → `GET /api/v1/workspaces` | 200 |
+| `/verify` read-only key → `POST /mcp` | 403 |
+| `/verify` read-only key → `GET /admin/status` | 403 |
+| `/verify` admin key → `GET /admin/status` | 200 |
+| `/verify` unknown bearer, passthrough on | 200 |
+| `/healthz` / `/readyz` | 200 / `{"status":"ready"}` |
+
+`/readyz` means "what this instance validates is loaded": the key store in
+keys-only mode, the JWKS in OIDC mode. It is not relaxed — a keys-only store
+never satisfies readiness for an OIDC instance whose JWKS failed.
 
 ### Why every 200 names `Authorization`
 

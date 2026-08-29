@@ -98,7 +98,11 @@ compose do servidor:
     restart: unless-stopped
     env_file: [.env]
     environment:
-      OIDC_ISSUER: https://<keycloak>/realms/memory
+      # SEM `OIDC_ISSUER`: este host não tem Keycloak (inventário em
+      # `djalmajr/infra` services.md o lista como receita NÃO implantada). O
+      # sidecar sobe em `mode: keys-only` — `amk_` é resolvido localmente e uma
+      # chave com escopo `admin` emite as outras. Se um dia houver Keycloak,
+      # basta setar o issuer aqui.
       KEYS_DB: /data/keys.db
       # MESMO valor já em AI_MEMORY_AUTH__ACTOR_PROXY_BEARER_TOKEN no engine —
       # e OBRIGATORIAMENTE distinto de AI_MEMORY_AUTH_TOKEN. O engine testa o
@@ -184,6 +188,21 @@ segredo vivo não volta a arquivo versionado.
 > introduzir um proxy local na frente de `engine` + `mcp-auth` e reapontar o
 > `cloudflared` para ele. Isso muda o único caminho de entrada do sistema em
 > produção — deve ser feito com janela e rollback combinados, não de passagem.
+
+> **Como reapontar o túnel** (de `djalmajr/infra` →
+> `runbooks/04-cloudflare-tunnel.md`): o ingress é gerenciado por API, tunnel
+> `dev` = `c0a4c887-7a8d-42d9-bfa2-f7318298ff37`, e hoje
+> `memory.djalmajr.dev` → `http://localhost:49374`. Alvo novo:
+> `http://localhost:8080` (o Caddy).
+>
+> ```bash
+> HOST=memory ORIGIN=http://127.0.0.1:8080 ./scripts/add-tunnel-host.sh
+> ```
+>
+> Precisa de `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`. **Nunca** rode
+> `scripts/setup-cloudflare-tunnel.sh` com `HOSTS` parcial: ele faz PUT da lista
+> inteira e apagaria `rancher`/`penpot`. Rollback = rodar o mesmo comando com
+> `ORIGIN=http://127.0.0.1:49374`.
 
 ### Proxy sugerido: Caddy — config **testada**, não proposta
 
@@ -421,18 +440,57 @@ A emissão é **fail-closed**: sem identidade, `POST /keys` responde 403 e a UI
 desabilita o submit com o estado `AUSENTE`. Então a primeira chave `admin` entra
 direto no banco:
 
+A imagem é `scratch`: **não há shell, `apk` nem `sqlite3` dentro dela** — logo
+nada de `docker compose exec mcp-auth sh`. Suba o sidecar uma vez (ele cria o
+schema), pare, semeie por um container Alpine que compartilha o **volume
+nomeado**, e suba de novo. Não use o `sqlite3` do host contra bind mount com o
+sidecar aberto: o WAL sobre bind mount do macOS devolve
+`disk I/O error (1034)` (reproduzido).
+
+O `owner_kind` da chave do operador decide se **uma** chave serve para tudo. O
+par `issuer|subject` é só um par de strings que engine e sidecar combinam —
+**não** exige provedor OIDC no ar:
+
+**Caminho A — uma chave para tudo (recomendado).** Configure no engine
+`root_issuer` + `root_subject` (hoje **ausentes** em produção; `root_username`
+já está setado) e emita a chave com `owner_kind='subject'` casando esses
+valores. O engine reconhece o par como raiz, então a mesma chave gere as chaves
+no sidecar **e** abre `Usuários` (UserManagement é root-only). Exige um restart
+do engine.
+
+**Caminho B — sem mexer no engine.** `owner_kind='user'`. A chave gere as chaves
+de consumidor e escreve na memória com atribuição, mas **não** é raiz: a tela
+`Usuários` responde 403. O bearer raiz do engine abriria `Usuários`, mas ele não
+é aceito em `/keys` (fail-closed, 403) — e a SPA guarda **uma** chave só, então
+é escolher uma das duas telas. Por isso A é o recomendado.
+
 ```bash
 SECRET="amk_$(openssl rand -hex 20)"
-SHA=$(printf '%s' "$SECRET" | shasum -a 256 | cut -d' ' -f1)
-sqlite3 /data/keys.db "INSERT INTO consumer_keys
- (id,key_sha256,key_last4,actor_user,scopes,owner_kind,owner_user,owner_issuer,owner_subject,owner_label,created_at)
- VALUES ('operator','$SHA','${SECRET: -4}','<seu-usuario>','read,write,admin',
-         'subject',NULL,'<root_issuer>','<root_subject>','<seu-usuario>',$(date +%s));"
+SHA=$(printf %s "$SECRET" | sha256sum | cut -d' ' -f1)
+VOL=$(docker volume ls -q | grep mcp-auth-keys)   # confirme o nome do volume
+
+docker compose stop mcp-auth
+docker run --rm -v "$VOL":/data alpine sh -c \
+  "apk add --no-cache sqlite >/dev/null && sqlite3 /data/keys.db \"INSERT INTO consumer_keys
+   (id,key_sha256,key_last4,actor_user,scopes,owner_kind,owner_user,owner_issuer,owner_subject,owner_label,created_at)
+   VALUES ('operator','$SHA','${SECRET: -4}','<seu-usuario>','read,write,admin',
+           'subject',NULL,'<root_issuer>','<root_subject>','<seu-usuario>',$(date +%s));\""
+docker compose start mcp-auth
+
 echo "$SECRET"   # cole na tela de login; é a única vez que aparece
 ```
 
-Papel no Keycloak: criar a realm role `mcp:admin` para quem pode emitir chaves.
-Se o realm não puder mudar, usar `KEYS_ADMIN_SUBJECTS` (`issuer|subject`).
+Acima é o **caminho A**. Para o B, troque as cinco colunas de dono por
+`'user','<seu-usuario>',NULL,NULL,'<seu-usuario>'`.
+
+Confira: `curl -H "Authorization: Bearer $SECRET" <base>/keys/whoami` →
+`{"can_issue":true,"identity":{...}}`.
+
+O papel `mcp:admin` e o `KEYS_ADMIN_SUBJECTS` **não se aplicam** neste host:
+ambos casam `issuer|subject` de um **JWT validado**, e sem provedor não há JWT.
+Uma chave `amk_` com escopo `admin` é o caminho de emissão aqui. Voltam a valer
+se o Keycloak for implantado (receita em `djalmajr/infra` →
+`runbooks/05-instalar-stack.md`, hoje "não implantada").
 
 ## 4. Migrar consumidores (ordem decidida: CLIs antes do hook)
 
@@ -448,6 +506,22 @@ Só depois de todos os CLIs migrados: rotacionar `AI_MEMORY_AUTH_TOKEN` (o
 bearer raiz deixa de ser credencial de cliente e volta a ser quebra-galho de
 operador). O token de hook é o **último** a sair, porque o `/hook` é o caminho
 que não pode piscar.
+
+### Por que o `/hook` não pode piscar
+
+Registrado em `djalmajr/infra` →
+`gotchas/hook-auth-personal-is-oidc-device-not-static.md`: quando o hook 401a, o
+`<data_dir>/hook-spool` enche até o cap (10000 arquivos) com capturas reais
+presas, e o backlog morto **bloqueia a fila** — o drain é oldest-first, então
+captura nova não passa até alguém descartar o backlog. Não é perder só os
+eventos da janela: a captura para.
+
+Naquele episódio o `mcp-auth` era Keycloak-only e recusava token estático no
+`/hook`. O sidecar atual tem o atalho do `HOOK_AUTH_TOKEN` (`isHookPath` +
+comparação de tempo constante) e foi medido devolvendo **202** com `actor_user`
+gravado — o caminho estático segue válido aqui. Mesmo assim: teste `POST /hook`
+**antes** de trocar qualquer credencial de hook e, se algo 401ar, esvazie o
+spool antes de seguir.
 
 ## 5. Verificação de borda
 
