@@ -107,6 +107,14 @@ compose do servidor:
       # assert them"), então tokens iguais fazem toda identidade traduzida
       # entrar como Root, sem atribuição, em silêncio.
       ACTOR_PROXY_BEARER_TOKEN: ${ACTOR_PROXY_BEARER_TOKEN}
+      # Sondado no servidor: `.env` já tem a chave `ACTOR_PROXY_BEARER_TOKEN`
+      # (não vazia), então esta interpolação resolve. Mas a linha do ENGINE em
+      # `compose.yml` é um LITERAL, não `${...}` — hoje os dois hashes batem
+      # (eb5df7fa…), e rotacionar só o `.env` os separaria em silêncio: toda
+      # chave `amk_` passaria a 401. Ao rotacionar, troque os DOIS, e confira:
+      #   docker compose config | grep -m1 ACTOR_PROXY_BEARER_TOKEN |
+      #     sed 's/.*: *//' | tr -d '"' | sha256sum | cut -c1-12
+      #   printf %s "$ACTOR_PROXY_BEARER_TOKEN" | sha256sum | cut -c1-12
       # Sem isto os branches de hook e OIDC ecoam o token do chamador, que não
       # entra no rung de proxy: medido, `POST /hook` devolve 401 (ausente) vs
       # 202 com `actor_user: user:djalmajr` (setado com o token de proxy).
