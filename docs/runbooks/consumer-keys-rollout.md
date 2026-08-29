@@ -6,15 +6,31 @@ consumidor do `mcp-auth` (issue #9) no deploy pessoal (Hetzner).
 O compose de produção **não vive neste repositório** — ele está no servidor, em
 `/opt/ai-memory/compose.yml`. Este runbook descreve as mudanças a aplicar lá.
 
-## 0. Estado de partida (verificado)
+## 0. Estado (atualizado 2026-08-29)
 
-- `/keys*` **não é roteável hoje** por nenhuma config versionada: o mux do
-  `mcp-auth` não tinha as rotas, o helm não mapeia o caminho, e o compose é
-  server-only. O passo 3 é o que fecha isso.
-- A SPA já degrada sozinha: sem backend de chaves, a tela **Consumidores**
-  mostra o banner "backend indisponível" e inventário vazio — nunca linhas
-  fabricadas.
-- `ACTOR_PROXY_BEARER_TOKEN` já está ativo em produção (sondado: `400
+**Já aplicado em produção:**
+
+- SPA administrativa no ar em `https://memory.djalmajr.dev/web/` — imagem
+  `ai-memory@sha256:ff0a07ba…` (a SPA é buildada dentro da imagem, ver passo 2).
+  Container `Up (healthy)`, zero linhas de erro no log, `/admin/status`
+  respondendo. Backup do compose anterior em
+  `/opt/ai-memory/compose.yml.bak-pre-adminui` (rollback = restaurar o digest
+  antigo e `docker compose up -d ai-memory`).
+- Imagem `mcp-auth` com o subsistema de chaves publicada em
+  `ghcr.io/djalmajr/ai-memory-ops/mcp-auth` (amd64, como o resto das imagens
+  deste repo) e verificada: em volume nomeado NOVO ela cria
+  `keys.db{,-shm,-wal}` como `65532` e sobe sem `keys_db_open_failed`.
+
+**Pendente, e por quê:**
+
+- O sidecar **não está no compose** e `/keys*` responde 404 na borda: falta a
+  decisão de infraestrutura do passo 3 (não existe proxy local para pendurar o
+  forwardAuth — hoje o `cloudflared` aponta direto para o engine).
+- Migração dos CLIs e rotação de tokens (passo 5) **não iniciada**: troca
+  credencial de agente em uso e deve ser feita uma por vez, com validação.
+- A SPA já degrada sozinha nesse meio-tempo: **Consumidores** mostra o banner
+  "backend indisponível" com inventário vazio, nunca linhas fabricadas.
+- `ACTOR_PROXY_BEARER_TOKEN` já está ativo no engine (sondado: `400
   MissingIdentity/Ambiguous` sem ator, `200` com ator válido).
 
 ## 1. Build da SPA
@@ -32,28 +48,43 @@ npx vitest run                                   # 126 testes
 npx playwright test e2e/login.spec.ts e2e/shell.spec.ts   # 14, modo fixtures
 ```
 
-## 2. Publicar `dist/` e **reiniciar o engine**
+## 2. Publicar a SPA — ela é **buildada dentro da imagem**, não copiada
 
-O engine serve a SPA com `--web-ui-dir <dir>` e **lê o `index.html` uma vez, no
-boot**. Publicar um build novo sem reiniciar deixa o HTML antigo em memória
-apontando para assets com hash que não existem mais; o browser recebe o
-fallback HTML no lugar do módulo e a tela fica **branca** com
-`Failed to load module script: ... MIME type of "text/html"`.
+`images/ai-memory/Dockerfile` clona `ai-memory-ui` do GitHub e roda o build no
+estágio `ui`, com `COPY --from=ui /ui/dist /web-ui`. O compose de produção
+**não monta volume em `/web-ui`** — a SPA vem da imagem. Então não existe
+`rsync dist/` neste deploy: publicar a UI é
 
-> **Ordem obrigatória: publicar `dist/` → reiniciar/recriar o container do
-> engine.** Isto foi reproduzido duas vezes na validação local.
+1. push na `main` do `ai-memory-ui`;
+2. rebuild da imagem `ai-memory` (o workflow `build-images.yml` cobre isso: ele
+   dispara em `images/**` e a matriz inclui `ai-memory`, então um push no ops
+   também reconstrói a imagem já com a SPA nova);
+3. apontar o compose para o digest novo e recriar o container.
 
 ```bash
-rsync -a --delete dist/ root@<host>:/opt/ai-memory/web-ui/
-ssh root@<host> 'cd /opt/ai-memory && docker compose restart ai-memory'
+# digest publicado
+docker pull --platform linux/amd64 ghcr.io/djalmajr/ai-memory-ops/ai-memory:latest
+docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/djalmajr/ai-memory-ops/ai-memory:latest
+
+# no servidor: backup, troca do digest, recriação
+cp /opt/ai-memory/compose.yml /opt/ai-memory/compose.yml.bak-pre-adminui
+sed -i 's|ai-memory@sha256:<antigo>|ai-memory@sha256:<novo>|' /opt/ai-memory/compose.yml
+cd /opt/ai-memory && docker compose pull ai-memory && docker compose up -d ai-memory
 ```
 
-Verificação: o `index.html` servido deve referenciar o mesmo hash que está em
-disco.
+O engine lê o `index.html` uma vez, no boot: recriar o container é o que troca a
+SPA. (Num deploy que *monte* `/web-ui` de um diretório do host, publicar sem
+reiniciar deixa o HTML antigo em memória apontando para hashes que não existem
+mais e a tela fica **branca** com
+`Failed to load module script: ... MIME type of "text/html"` — reproduzido duas
+vezes na validação. Com a SPA na imagem, o problema não existe.)
+
+Verificação (aplicada em 2026-08-29):
 
 ```bash
-curl -s -u ":$ROOT_TOKEN" https://memory.djalmajr.dev/web/ | grep -o 'assets/[^"]*\.js'
-ls /opt/ai-memory/web-ui/assets/ | grep index
+docker ps --filter name=ai-memory-ai-memory-1 --format '{{.Status}}'   # Up (healthy)
+docker exec ai-memory-ai-memory-1 sh -c 'ls /web-ui/assets | grep -cE "^(access|consumers|login|users|ops)-"'
+curl -s -u ":$ROOT_TOKEN" https://memory.djalmajr.dev/web/ | grep -o 'assets/index-[^"]*\.js'
 ```
 
 ## 3. Subir o `mcp-auth` com chaves e rotear `/keys*`
@@ -63,18 +94,34 @@ compose do servidor:
 
 ```yaml
   mcp-auth:
-    image: <registry>/mcp-auth:<tag-nova>
+    image: ghcr.io/djalmajr/ai-memory-ops/mcp-auth@sha256:<digest>
+    restart: unless-stopped
+    env_file: [.env]
     environment:
       OIDC_ISSUER: https://<keycloak>/realms/memory
       KEYS_DB: /data/keys.db
-      # MESMO valor já configurado no engine — é o que o /verify injeta upstream.
+      # MESMO valor já em AI_MEMORY_AUTH__ACTOR_PROXY_BEARER_TOKEN no engine.
       ACTOR_PROXY_BEARER_TOKEN: ${ACTOR_PROXY_BEARER_TOKEN}
-      # Mantém os CLIs atuais funcionando durante a migração (passo 4).
+      # Mantém os CLIs atuais funcionando durante a migração (passo 5).
       PASSTHROUGH_UNKNOWN_BEARER: "1"
-      HOOK_AUTH_TOKEN: ${HOOK_AUTH_TOKEN}
     volumes:
       - mcp-auth-keys:/data
 ```
+
+> **A topologia atual não tem onde pendurar o forwardAuth.** Verificado no
+> servidor: nada escuta em 80/443; o único listener é
+> `127.0.0.1:49374` (o engine), e o `cloudflared` roda no host apontando o
+> hostname direto para ele. Não há Traefik, Caddy, nginx nem oauth2-proxy.
+>
+> Regra de ingress de túnel resolve **roteamento por caminho**, e nada mais. O
+> contrato do `/verify` exige uma subrequest de autenticação que **substitui** o
+> `Authorization` e injeta `X-Memory-Actor-*` — isso é `forward_auth` (Caddy),
+> `auth_request` (nginx) ou `forwardAuth` (Traefik), não ingress de túnel.
+>
+> Portanto o passo 3 exige uma decisão de infraestrutura ainda não tomada:
+> introduzir um proxy local na frente de `engine` + `mcp-auth` e reapontar o
+> `cloudflared` para ele. Isso muda o único caminho de entrada do sistema em
+> produção — deve ser feito com janela e rollback combinados, não de passagem.
 
 O volume nomeado pode entrar vazio: a imagem provisiona `/data` já com dono
 `65532:65532`, e um volume novo herda dono e modo do diretório que existe na
