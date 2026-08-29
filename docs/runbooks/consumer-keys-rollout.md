@@ -139,22 +139,29 @@ compose do servidor:
 		reverse_proxy ai-memory:49374
 	}
 
+	# Catch-all como `handle` (fica no grupo de exclusão mútua dos handles
+	# acima), com `route` DENTRO dele — `route` é outra diretiva, e um `route`
+	# no topo dependeria de o `reverse_proxy` dos handles ser terminal para não
+	# ser avaliado também. O nesting não depende dessa interação.
+	#
 	# `route` preserva a ordem do arquivo (fora dele o Caddy reordena
 	# diretivas). Strip explícito ANTES do forward_auth, defesa em
 	# profundidade: se algum dia alguém encurtar o `copy_headers`, os cinco
 	# continuam sendo descartados.
-	route {
-		request_header -X-Memory-Actor-User
-		request_header -X-Memory-Actor-Sub
-		request_header -X-Memory-Actor-Issuer
-		request_header -X-Memory-Actor-Client
-		request_header -X-Memory-Actor-Agent
+	handle {
+		route {
+			request_header -X-Memory-Actor-User
+			request_header -X-Memory-Actor-Sub
+			request_header -X-Memory-Actor-Issuer
+			request_header -X-Memory-Actor-Client
+			request_header -X-Memory-Actor-Agent
 
-		forward_auth mcp-auth:8081 {
-			uri /verify
-			copy_headers Authorization X-Memory-Actor-User X-Memory-Actor-Sub X-Memory-Actor-Issuer X-Memory-Actor-Client X-Memory-Actor-Agent
+			forward_auth mcp-auth:8081 {
+				uri /verify
+				copy_headers Authorization X-Memory-Actor-User X-Memory-Actor-Sub X-Memory-Actor-Issuer X-Memory-Actor-Client X-Memory-Actor-Agent
+			}
+			reverse_proxy ai-memory:49374
 		}
-		reverse_proxy ai-memory:49374
 	}
 }
 ```
@@ -194,14 +201,38 @@ Caddy 2 contra um upstream de eco:
   (`autoscope_stress.rs:795-804`, teste
   `header_session_id_is_cache_key_not_credential`).
 
+Isolamento de caminho, medido (o `/verify` falso logando cada subrequest):
+`/keys`, `/keys/abc123`, `/web/` e `/web/assets/x.js` **nunca** chamaram o
+`/verify`; só `/mcp` e `/api/v1/workspaces` chamaram. Vale nas duas formas
+(`route` no topo e `handle { route { … } }`) — a forma com nesting é a do
+arquivo porque não depende de handler terminal.
+
+Consequência: `/keys*` e `/web*` **repassam** header de ator forjado pelo
+cliente, porque não passam por strip nem por `copy_headers`. Medido, e **inerte
+nos dois destinos** — por isso não há strip ali:
+
+- o `mcp-auth` nunca lê `X-Memory-Actor-*` de entrada (zero ocorrências de
+  `Header.Get` para eles em `main.go`/`keys.go`); o dono da chave vem sempre da
+  credencial de quem chama;
+- o engine só honra header de ator no degrau de **proxy confiável**. No degrau
+  raiz/cookie — que é o do `/web` — eles são ignorados: teste
+  `actor_headers_are_ignored_on_the_root_rung` (`auth.rs:1272-1293`) manda
+  `X-Memory-Actor-User: impostor` com o token raiz e o ator continua `boss`.
+  Há o par `actor_headers_are_ignored_without_a_configured_proxy_bearer`
+  (`auth.rs:1243`).
+
 Corte com risco baixo: subir Caddy + mcp-auth numa porta paralela
 (`127.0.0.1:8080`) com o engine ainda publicando 49374, validar por curl e pela
 suíte `live.spec.ts` apontada para `http://127.0.0.1:8080/web`, e só então
 reapontar o `cloudflared`. Rollback = reapontar o túnel de volta.
 
-Antes do corte, repetir contra a porta nova: os cinco headers forjados (um a um
-e combinados) devem chegar só com valor verificado, **e** um `/hook` com
-`X-Memory-Actor-Session-Id` deve preservar a sessão.
+Antes do corte, repetir contra a porta nova:
+
+1. os cinco headers forjados (um a um e combinados) chegam só com valor
+   verificado;
+2. um `/hook` com `X-Memory-Actor-Session-Id` preserva a sessão;
+3. `/keys*` e `/web*` não aparecem no log do `mcp-auth` como subrequest de
+   `/verify` — se aparecerem, o catch-all deixou de ser mutuamente exclusivo.
 
 O volume nomeado pode entrar vazio: a imagem provisiona `/data` já com dono
 `65532:65532`, e um volume novo herda dono e modo do diretório que existe na
