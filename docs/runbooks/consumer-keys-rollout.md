@@ -123,6 +123,72 @@ compose do servidor:
 > `cloudflared` para ele. Isso muda o único caminho de entrada do sistema em
 > produção — deve ser feito com janela e rollback combinados, não de passagem.
 
+### Proxy sugerido: Caddy — config **testada**, não proposta
+
+```caddyfile
+:8080 {
+	# /keys* vai direto ao sidecar: ele É o serviço de auth; passá-lo pelo
+	# próprio forward_auth devolve 401.
+	handle /keys* {
+		reverse_proxy mcp-auth:8081
+	}
+
+	# /web (documento + assets) sem forward_auth: o browser manda Basic, que o
+	# sidecar não entende. O engine autentica isso sozinho.
+	handle /web* {
+		reverse_proxy ai-memory:49374
+	}
+
+	handle {
+		forward_auth mcp-auth:8081 {
+			uri /verify
+			copy_headers Authorization X-Memory-Actor-User X-Memory-Actor-Sub X-Memory-Actor-Issuer X-Memory-Actor-Client X-Memory-Actor-Agent
+		}
+		reverse_proxy ai-memory:49374
+	}
+}
+```
+
+A lista de `copy_headers` é o ponto de segurança, e ela tem exatamente os
+**cinco** headers que o `mcp-auth` emite (`main.go:481-503`). Verificado com
+Caddy 2 contra um upstream de eco:
+
+- `copy_headers` é **autoritativo sobre a lista**: header presente na resposta
+  do `/verify` é setado no request; header **ausente é removido**. Forjar os
+  cinco de fora resulta em só o valor verificado no upstream.
+- Header de ator **fora da lista passa forjado**. Com a lista curta
+  (User/Sub/Issuer), um `X-Memory-Actor-Client: forjado-cli` e um
+  `X-Memory-Actor-Agent: forjado-agent` do cliente **chegaram** ao upstream —
+  o engine confia nos dois (`auth.rs:1004`), então atribuição de cliente/agente
+  ficaria forjável.
+- **Não** adicione `request_header -X-Memory-Actor-*` antes do `forward_auth`:
+  a ordem de diretivas do Caddy não é a ordem do arquivo, o strip roda **depois**
+  do `copy_headers` e o ator verificado chega **vazio** (testado).
+
+`X-Memory-Actor-Session-Id` fica **deliberadamente fora da lista**, e isso não
+é descuido:
+
+- o sidecar nunca o emite — é reservado à sessão real de lifecycle-hook, não à
+  sessão de login do provedor (`main.go:477-479`);
+- quem o manda são o hook gerado (`install_hooks.rs:3475`) e o
+  `mcp_bridge` (`mcp_bridge.rs:19`). Listá-lo faria o Caddy **apagar** essa
+  sessão legítima em todo request, quebrando auto-scope em silêncio;
+- forjá-lo não escala privilégio: o engine trata session_id de header como
+  **cache key, não credencial** — o componente `user` vem só do `ActorContext`
+  do middleware, nunca do header. Uma sessão forjada dá o slot
+  `(user-autenticado, sessão-forjada)`, nunca o slot de outro
+  (`autoscope_stress.rs:795-804`, teste
+  `header_session_id_is_cache_key_not_credential`).
+
+Corte com risco baixo: subir Caddy + mcp-auth numa porta paralela
+(`127.0.0.1:8080`) com o engine ainda publicando 49374, validar por curl e pela
+suíte `live.spec.ts` apontada para `http://127.0.0.1:8080/web`, e só então
+reapontar o `cloudflared`. Rollback = reapontar o túnel de volta.
+
+Antes do corte, repetir contra a porta nova: os cinco headers forjados (um a um
+e combinados) devem chegar só com valor verificado, **e** um `/hook` com
+`X-Memory-Actor-Session-Id` deve preservar a sessão.
+
 O volume nomeado pode entrar vazio: a imagem provisiona `/data` já com dono
 `65532:65532`, e um volume novo herda dono e modo do diretório que existe na
 imagem naquele caminho. **Não** troque o `USER` para root nem adicione um passo
