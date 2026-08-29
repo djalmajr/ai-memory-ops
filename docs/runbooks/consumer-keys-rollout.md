@@ -327,9 +327,10 @@ só-cookie não recebe botão de mutação**.
 
 ## 7. Nota de auth que muda a percepção da UI
 
-Num engine com auth configurada, o próprio HTML do `/web` é protegido. Depois do
-Basic (ou do oauth2-proxy) o engine emite o cookie `ai_memory_auth`, e **esse
-cookie autentica apenas GET** — toda mutação exige o header `Authorization`.
+Num engine com auth configurada, o próprio HTML do `/web` é protegido. Quem
+autentica é o engine: Basic com **qualquer** usuário e a senha = bearer raiz.
+Aceito o Basic, ele emite o cookie `ai_memory_auth`, e **esse cookie autentica
+apenas GET** — toda mutação exige o header `Authorization`.
 
 A SPA trata isso explicitamente: uma sessão autenticada só por cookie recebe o
 degrau `cookie-admin`, vê todas as telas de leitura e tem **todas as ações de
