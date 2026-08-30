@@ -10,15 +10,15 @@ O compose de produção **não vive neste repositório** — ele está no servid
 
 **Aplicado em produção:**
 
-- SPA administrativa em `https://memory.djalmajr.dev/web/`, servida pelo
-  engine 1.32.2. O documento e os assets são públicos na borda para que a rota
-  `/login` carregue; administração, leitura e mutações continuam protegidas por
-  chave Bearer.
+- SPA administrativa canônica em `https://memory.djalmajr.dev/`, servida pelo
+  engine 1.33.1. `/login` usa usuário/senha e cookie `ai_memory_session`;
+  `/web` e `/web/...` respondem 308 para as rotas equivalentes na raiz.
 - `mcp-auth` em modo `keys-only`, com banco no volume nomeado
-  `ai-memory_mcp-auth-keys`; `/keys*` é roteado diretamente ao sidecar.
-- Caddy em `127.0.0.1:8080` faz o `forward_auth` do restante da borda. O túnel
-  Cloudflare aponta para essa porta; rollback do ingresso = reapontar para
-  `http://127.0.0.1:49374`.
+  `ai-memory_mcp-auth-keys`; `/keys*` é roteado diretamente ao sidecar e
+  sessões são introspectadas pelo engine via Compose DNS.
+- Caddy em `127.0.0.1:8080` deixa SPA e `/auth*` públicos sem Authorization
+  nem actor headers, fecha `/internal/*` com 404 e mantém `forward_auth` nas
+  rotas de máquina/dados. O túnel Cloudflare aponta para essa porta.
 - Chave `operator` (`read,write,admin`, owner `subject`) e chaves dedicadas
   `claude-code`, `cursor`, `codex` e `omp` (`read,write`) emitidas. Cada cliente
   leu, escreveu e apagou uma página com atribuição `djalmajr`.
@@ -27,22 +27,25 @@ O compose de produção **não vive neste repositório** — ele está no servid
 - `AI_MEMORY_AUTH_TOKEN`, `ACTOR_PROXY_BEARER_TOKEN` e `HOOK_AUTH_TOKEN` foram
   rotacionados e são distintos. `PASSTHROUGH_UNKNOWN_BEARER=0`; o bearer raiz
   anterior e bearers desconhecidos respondem 401 na borda.
+- Root humano `djalmajr` bootstrapped com troca obrigatória de senha.
+  `AI_MEMORY_AUTH__INITIAL_ROOT_PASSWORD` já foi removida do compose/processo;
+  recovery e o pepper estável de credenciais `aim_` permanecem configurados.
 - O spool local legado, que havia atingido 10.000 eventos sem autenticação, foi
   autenticado, replayado e drenado antes da rotação. Sete `PreCompact` presos
   foram recuperados com o provider LLM temporariamente desativado, evitando o
   timeout de 300 s por evento; a configuração normal foi restaurada em seguida.
 
-Backups operacionais: `/opt/ai-memory/compose.yml.bak-pre-consumer-keys`,
-`/opt/ai-memory/Caddyfile.bak-pre-spool-drain`, backups de rotação
-`/opt/ai-memory/{.env,compose.yml}.bak-token-rotation-*` e o par
-`/opt/ai-memory/{Caddyfile,compose.yml}.bak-login-route-*`.
+Backups operacionais incluem
+`/opt/ai-memory/{.env,compose.yml,Caddyfile}.bak-root-gate3-20260830T200320Z`
+e o snapshot verificado
+`/opt/ai-memory/backup-pre-root-gate3-20260830T200320Z.tar.gz`
+(SHA-256 `518618e07175dfe1d8a1c69be952d86451e1bb8ab3605b14b227469b44dc6b74`),
+além dos backups históricos listados nas seções de rollout anteriores.
 
-**Alvo (Stories 05–07, código/runbook neste repo — corte no servidor é o
-Gate 3):** SPA password-only em `/` e nas subrotas do app, cookie
-`ai_memory_session`, Caddy sem inject do bearer raiz nas rotas públicas da SPA,
-handles `/auth*` e `/internal/*`, sidecar com passthrough de cookie e
-introspecção em `/keys*`. `/web` passa a ser somente redirect legado. Este
-runbook **não** muta `/opt`. Ver seção 8.
+**Gate 3 aplicado:** engine/UI e sidecar estão presos por digest; a SPA usa
+sessão humana na raiz, o Caddy não recebe/injeta o bearer raiz e `/web` existe
+somente como redirect legado. Credencial inicial/recovery foi registrada em
+arquivo root-only no host; nenhum valor entra neste repositório.
 
 ## 1. Build da SPA
 
@@ -176,19 +179,20 @@ print("caddy web token       :", "AUSENTE" if not cw else "PRESENTE")
 print("engine internal url   :", "presente" if env("mcp-auth","ENGINE_INTERNAL_URL") else "AUSENTE")
 print("engine internal host  :", "presente" if env("mcp-auth","ENGINE_INTERNAL_HOST") else "AUSENTE")
 print("trusted proxy cidrs   :", "presente" if env("ai-memory","AI_MEMORY_AUTH__TRUSTED_PROXY_CIDRS") else "AUSENTE")
+print("token pepper         :", "presente" if env("ai-memory","AI_MEMORY_AUTH__TOKEN_PEPPER") else "AUSENTE")
+print("initial root password:", "AUSENTE" if not env("ai-memory","AI_MEMORY_AUTH__INITIAL_ROOT_PASSWORD") else "PRESENTE")
+print("recovery token        :", "presente" if env("ai-memory","AI_MEMORY_AUTH__RECOVERY_TOKEN") else "AUSENTE")
 '
 ```
 
 Lê o compose **resolvido**, então cobre literal e `${...}` igualmente, e não
 depende de o `.env` estar exportado no shell.
 
-**Hoje (aplicado):** `engine == sidecar: MATCH`, `proxy != root: DISTINCT` e
-`caddy web token: PRESENTE` (inject do raiz em `/web*`).
-
-**Alvo (Gate 3):** os mesmos MATCH/DISTINCT, mais `caddy web token: AUSENTE`,
-`engine internal url/host: presente` e `trusted proxy cidrs: presente`.
-`PRESENTE` no Caddy depois do corte significa que o inject de raiz voltou e
-a SPA password-only não é pública de verdade.
+**Hoje (Gate 3 aplicado):** `engine == sidecar: MATCH`,
+`proxy != root: DISTINCT`, `caddy web token: AUSENTE`, internal URL/host,
+trusted proxy CIDR, recovery e token pepper presentes. A senha inicial fica
+ausente depois do bootstrap. `PRESENTE` no Caddy significa regressão: o inject
+de raiz voltou e a SPA password-only deixou de ser pública de verdade.
 
 `DIFFER` em `engine == sidecar` faz toda chave `amk_` retornar 401; `SAME` em
 `proxy != root` transforma toda identidade traduzida em Root sem atribuição.
@@ -334,6 +338,9 @@ no Gate 2):
       AI_MEMORY_AUTH__TRUSTED_PROXY_CIDRS: ${AI_MEMORY_AUTH__TRUSTED_PROXY_CIDRS}
       AI_MEMORY_AUTH__INITIAL_ROOT_PASSWORD: ${AI_MEMORY_AUTH__INITIAL_ROOT_PASSWORD}
       AI_MEMORY_AUTH__RECOVERY_TOKEN: ${AI_MEMORY_AUTH__RECOVERY_TOKEN}
+      # Pepper estável para hashes das credenciais nativas aim_. Deve existir
+      # antes da primeira key e nunca ser rotacionado sem revogar todas.
+      AI_MEMORY_AUTH__TOKEN_PEPPER: ${AI_MEMORY_AUTH__TOKEN_PEPPER}
 
   caddy:
     environment:
@@ -562,13 +569,13 @@ Registrar digests atuais (engine/UI, sidecar, Caddy), commits candidatos
 `AI_MEMORY_REF`/`AI_MEMORY_UI_REF`, backup verificado do SQLite do engine e
 do `KEYS_DB`, cópia de Caddyfile/compose/inventário de **nomes** de variáveis
 (nunca valores). Confirmar por presença (não por hash impresso) que
-`AI_MEMORY_AUTH_TOKEN`, `ACTOR_PROXY_BEARER_TOKEN`, recovery e senha inicial
-são distintos. Preparar
+`AI_MEMORY_AUTH_TOKEN`, `ACTOR_PROXY_BEARER_TOKEN`, recovery, senha inicial e
+token pepper são distintos. Preparar
 `AI_MEMORY_AUTH__INITIAL_ROOT_PASSWORD`, `AI_MEMORY_AUTH__RECOVERY_TOKEN`,
+`AI_MEMORY_AUTH__TOKEN_PEPPER` (64 hex, estável),
 `AI_MEMORY_AUTH__TRUSTED_PROXY_CIDRS` (peer Caddy),
-`ENGINE_INTERNAL_URL=http://ai-memory:49374`,
-`ENGINE_INTERNAL_HOST` já em `AI_MEMORY_ALLOWED_HOSTS`. Comprovar os quatro
-clientes `amk_`.
+`ENGINE_INTERNAL_URL=http://ai-memory:49374` e `ENGINE_INTERNAL_HOST` já em
+`AI_MEMORY_ALLOWED_HOSTS`. Comprovar os quatro clientes `amk_`.
 
 ### Gate 1 — ensaio isolado
 
@@ -589,8 +596,8 @@ de destino sem recarregar tráfego. Pré-puxar só digests candidatos.
 
 1. Manutenção no ingresso.
 2. Parar o engine antigo; snapshot pré-migration.
-3. Compose/env com senha inicial, recovery, CIDR e `ENGINE_INTERNAL_*`
-   presentes; subir engine/UI pelo digest candidato.
+3. Compose/env com senha inicial, recovery, token pepper, CIDR e
+   `ENGINE_INTERNAL_*` presentes; subir engine/UI pelo digest candidato.
 4. Trocar Caddy pelo de destino; remover `AI_MEMORY_WEB_UPSTREAM_TOKEN`.
 5. Tirar manutenção; smoke pelo domínio.
 6. Falha → manutenção, restaurar Caddy/compose/digests/snapshot. Nunca
