@@ -11,7 +11,7 @@ O compose de produção **não vive neste repositório** — ele está no servid
 **Aplicado em produção:**
 
 - SPA administrativa canônica em `https://memory.djalmajr.dev/`, servida pelo
-  engine 1.33.1. `/login` usa usuário/senha e cookie `ai_memory_session`;
+  engine 1.37.0. `/login` usa usuário/senha e cookie `ai_memory_session`;
   `/web` e `/web/...` respondem 308 para as rotas equivalentes na raiz.
 - `mcp-auth` em modo `keys-only`, com banco no volume nomeado
   `ai-memory_mcp-auth-keys`; `/keys*` é roteado diretamente ao sidecar e
@@ -41,6 +41,13 @@ e o snapshot verificado
 `/opt/ai-memory/backup-pre-root-gate3-20260830T200320Z.tar.gz`
 (SHA-256 `518618e07175dfe1d8a1c69be952d86451e1bb8ab3605b14b227469b44dc6b74`),
 além dos backups históricos listados nas seções de rollout anteriores.
+
+A imagem ativa é
+`ghcr.io/djalmajr/ai-memory-ops/ai-memory@sha256:8b78527bef5a55b6bb33bd28a855551a9b1885ba717889ff51396fd1719c7621`,
+construída no workflow `33335168979` a partir do engine
+`9f1762ad2046564be0e8a686718ca2bb0014dc40` e da UI
+`aa3c367eabe5dc8479aa0628fc37af89e6f1d8a5`. O rollout preservou
+`/opt/ai-memory/compose.yml.bak-recovery-copy-20260830T210912Z`.
 
 **Gate 3 aplicado:** engine/UI e sidecar estão presos por digest; a SPA usa
 sessão humana na raiz, o Caddy não recebe/injeta o bearer raiz e `/web` existe
