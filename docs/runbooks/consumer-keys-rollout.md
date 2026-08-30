@@ -11,8 +11,9 @@ O compose de produção **não vive neste repositório** — ele está no servid
 **Aplicado em produção:**
 
 - SPA administrativa em `https://memory.djalmajr.dev/web/`, servida pelo
-  engine 1.32.2. O smoke live cobre administração, leitura de página, usuário
-  sem privilégios e sessão somente-cookie.
+  engine 1.32.2. O documento e os assets são públicos na borda para que a rota
+  `/login` carregue; administração, leitura e mutações continuam protegidas por
+  chave Bearer.
 - `mcp-auth` em modo `keys-only`, com banco no volume nomeado
   `ai-memory_mcp-auth-keys`; `/keys*` é roteado diretamente ao sidecar.
 - Caddy em `127.0.0.1:8080` faz o `forward_auth` do restante da borda. O túnel
@@ -32,8 +33,9 @@ O compose de produção **não vive neste repositório** — ele está no servid
   timeout de 300 s por evento; a configuração normal foi restaurada em seguida.
 
 Backups operacionais: `/opt/ai-memory/compose.yml.bak-pre-consumer-keys`,
-`/opt/ai-memory/Caddyfile.bak-pre-spool-drain` e os backups de rotação
-`/opt/ai-memory/{.env,compose.yml}.bak-token-rotation-*`.
+`/opt/ai-memory/Caddyfile.bak-pre-spool-drain`, backups de rotação
+`/opt/ai-memory/{.env,compose.yml}.bak-token-rotation-*` e o par
+`/opt/ai-memory/{Caddyfile,compose.yml}.bak-login-route-*`.
 
 ## 1. Build da SPA
 
@@ -116,15 +118,15 @@ compose do servidor:
       # Fonte única: `.env`. Sondado no servidor — a linha do engine é
       # `AI_MEMORY_AUTH__ACTOR_PROXY_BEARER_TOKEN: ${ACTOR_PROXY_BEARER_TOKEN}`,
       # interpolação, não literal (o valor não aparece em `compose.yml`; só em
-      # `.env`). Então rotacionar o `.env` basta para os dois serviços — mas
-      # confirme com o check da seção "Conferência de tokens" abaixo, que lê o
-      # compose RESOLVIDO.
+      # `.env`). A fonte é única, mas a rotação exige recriar engine,
+      # mcp-auth E Caddy para os três receberem o valor novo. Confirme com o
+      # check da seção "Conferência de tokens" abaixo.
       # Sem isto os branches de hook e OIDC ecoam o token do chamador, que não
       # entra no rung de proxy: medido, `POST /hook` devolve 401 (ausente) vs
       # 202 com `actor_user: user:djalmajr` (setado com o token de proxy).
       UPSTREAM_AUTH_TOKEN: ${ACTOR_PROXY_BEARER_TOKEN}
-      # Mantém os CLIs atuais funcionando durante a migração (passo 5).
-      PASSTHROUGH_UNKNOWN_BEARER: "1"
+      # Migração encerrada: bearers desconhecidos falham fechado.
+      PASSTHROUGH_UNKNOWN_BEARER: "0"
       # OAuth/DCR desligado: o handler de metadata RFC 9728 responde 404 até
       # OAUTH_ENABLED=true. A rota do Caddy existe de qualquer forma, para o
       # 404 vir do sidecar (quem serve o endpoint) e não do engine.
@@ -151,22 +153,22 @@ pe=env("ai-memory","AI_MEMORY_AUTH__ACTOR_PROXY_BEARER_TOKEN")
 rt=env("ai-memory","AI_MEMORY_AUTH_TOKEN")
 ps=env("mcp-auth","ACTOR_PROXY_BEARER_TOKEN")
 us=env("mcp-auth","UPSTREAM_AUTH_TOKEN")
+cw=env("caddy","AI_MEMORY_WEB_UPSTREAM_TOKEN")
 print("proxy token no engine :", "presente" if pe else "AUSENTE")
 print("proxy != root         :", "DISTINCT" if pe and pe != rt else "SAME/AUSENTE")
-print("sidecar no compose    :", "sim" if "mcp-auth" in s else "ainda nao")
 print("engine == sidecar     :", ("MATCH" if pe==ps==us else "DIFFER") if (ps or us) else "n/a")
+print("caddy web == root     :", "MATCH" if cw and cw==rt else "DIFFER/AUSENTE")
 '
 ```
 
 Lê o compose **resolvido**, então cobre literal e `${...}` igualmente, e não
-depende de o `.env` estar exportado no shell (o Compose o usa para interpolação
-sem exportá-lo). Estado em 2026-08-29, antes do sidecar existir:
-`proxy token no engine: presente`, `proxy != root: DISTINCT`,
-`sidecar no compose: ainda nao`.
+depende de o `.env` estar exportado no shell. O estado esperado é
+`engine == sidecar: MATCH`, `proxy != root: DISTINCT` e
+`caddy web == root: MATCH`.
 
-Depois de adicionar o sidecar, o esperado é `engine == sidecar: MATCH`.
-`DIFFER` significa que toda chave `amk_` vai 401; `SAME` em `proxy != root`
-significa que toda identidade traduzida entra como Root sem atribuição.
+`DIFFER` em `engine == sidecar` faz toda chave `amk_` retornar 401; `SAME` em
+`proxy != root` transforma toda identidade traduzida em Root sem atribuição.
+`DIFFER/AUSENTE` no Caddy devolve o desafio Basic antes de a SPA carregar.
 
 Nota de higiene: o commit `223927b` deste repo (público) registrou por engano um
 prefixo de 12 hex do SHA-256 do token de proxy vivo. Já saiu do HEAD. Um
@@ -208,6 +210,16 @@ segredo vivo não volta a arquivo versionado.
 
 ### Proxy sugerido: Caddy — config **testada**, não proposta
 
+O container recebe somente a credencial interna necessária para servir a SPA;
+não use `env_file`, que exporia ao Caddy todas as credenciais de providers:
+
+```yaml
+  caddy:
+    environment:
+      AI_MEMORY_WEB_UPSTREAM_TOKEN: ${AI_MEMORY_AUTH_TOKEN}
+```
+
+
 ```caddyfile
 :8080 {
 	# /keys* vai direto ao sidecar: ele É o serviço de auth; passá-lo pelo
@@ -216,10 +228,14 @@ segredo vivo não volta a arquivo versionado.
 		reverse_proxy mcp-auth:8081
 	}
 
-	# /web (documento + assets) sem forward_auth: o browser manda Basic, que o
-	# sidecar não entende. O engine autentica isso sozinho.
+	# O documento e os assets da SPA são públicos. O engine exige auth até para
+	# servir HTML, então o Caddy autentica SOMENTE este upstream com o root;
+	# o token nunca volta ao browser e Bearer não emite cookie. As APIs continuam
+	# no forward_auth abaixo e a SPA mostra /login quando não há chave local.
 	handle /web* {
-		reverse_proxy ai-memory:49374
+		reverse_proxy ai-memory:49374 {
+			header_up Authorization "Bearer {$AI_MEMORY_WEB_UPSTREAM_TOKEN}"
+		}
 	}
 
 	# Metadata RFC 9728: quem serve é o SIDECAR (`main.go:134`); o engine não
@@ -230,26 +246,6 @@ segredo vivo não volta a arquivo versionado.
 		reverse_proxy mcp-auth:8081
 	}
 
-	# Sessão só-cookie: a SPA no degrau `cookie-admin` não guarda chave, então
-	# não manda `Authorization` — e o sidecar 401 qualquer request sem Bearer,
-	# antes do engine. Quem sabe validar esse cookie é o engine, que o emitiu.
-	# Restrito a GET/HEAD: o engine já recusa mutação por cookie, e aqui a
-	# recusa acontece uma camada antes.
-	@cookie_only {
-		not header Authorization *
-		header Cookie *ai_memory_auth=*
-		method GET HEAD
-	}
-	handle @cookie_only {
-		route {
-			request_header -X-Memory-Actor-User
-			request_header -X-Memory-Actor-Sub
-			request_header -X-Memory-Actor-Issuer
-			request_header -X-Memory-Actor-Client
-			request_header -X-Memory-Actor-Agent
-			reverse_proxy ai-memory:49374
-		}
-	}
 
 	# Catch-all como `handle` (fica no grupo de exclusão mútua dos handles
 	# acima), com `route` DENTRO dele — `route` é outra diretiva, e um `route`
@@ -315,68 +311,54 @@ Caddy 2 contra um upstream de eco:
 
 Isolamento de caminho, medido (o `/verify` falso logando cada subrequest):
 `/keys`, `/keys/abc123`, `/web/` e `/web/assets/x.js` **nunca** chamaram o
-`/verify`; só `/mcp` e `/api/v1/workspaces` chamaram. Vale nas duas formas
-(`route` no topo e `handle { route { … } }`) — a forma com nesting é a do
-arquivo porque não depende de handler terminal.
+`/verify`; só `/mcp` e `/api/v1/workspaces` chamaram.
 
-Consequência: `/keys*` e `/web*` **repassam** header de ator forjado pelo
-cliente, porque não passam por strip nem por `copy_headers`. Medido, e **inerte
-nos dois destinos** — por isso não há strip ali:
+Consequência: `/keys*` e `/web*` não passam pelo strip do catch-all. Isso é
+inerte nos dois destinos:
 
-- o `mcp-auth` nunca lê `X-Memory-Actor-*` de entrada (zero ocorrências de
-  `Header.Get` para eles em `main.go`/`keys.go`); o dono da chave vem sempre da
-  credencial de quem chama;
-- o engine só honra header de ator no degrau de **proxy confiável**. No degrau
-  raiz/cookie — que é o do `/web` — eles são ignorados: teste
-  `actor_headers_are_ignored_on_the_root_rung` (`auth.rs:1272-1293`) manda
-  `X-Memory-Actor-User: impostor` com o token raiz e o ator continua `boss`.
-  Há o par `actor_headers_are_ignored_without_a_configured_proxy_bearer`
-  (`auth.rs:1243`).
+- o `mcp-auth` nunca lê `X-Memory-Actor-*` de entrada; o dono da chave vem
+  sempre da credencial de quem chama;
+- em `/web*`, o Caddy **sobrescreve** `Authorization` com o bearer raiz apenas
+  na conexão interna ao engine. O engine ignora headers de ator no degrau raiz
+  (`actor_headers_are_ignored_on_the_root_rung`) e não emite
+  `ai_memory_auth`, pois esse cookie só nasce de Basic. O bearer não é enviado
+  ao browser; o cliente recebe somente HTML/assets públicos e precisa colar uma
+  chave na rota `/login` para chamar qualquer API.
 
 Corte com risco baixo: subir Caddy + mcp-auth numa porta paralela
 (`127.0.0.1:8080`) com o engine ainda publicando 49374, validar por curl e pela
 suíte `live.spec.ts` apontada para `http://127.0.0.1:8080/web`, e só então
 reapontar o `cloudflared`. Rollback = reapontar o túnel de volta.
 
-Esta config foi exercitada com a cadeia inteira local — Caddy 2 + `mcp-auth`
-compilado do fonte + engine 1.32.2 real servindo a SPA — e o Caddyfile do teste
-saiu **deste bloco**, só trocando os alvos. Resultado:
+Esta config foi exercitada com a cadeia inteira — Caddy 2 + `mcp-auth` +
+engine 1.32.2 real servindo a SPA. Resultado:
 
 | Request | Quem respondeu |
 |---|---|
-| `/.well-known/oauth-protected-resource` | sidecar, metadata real |
+| `/.well-known/oauth-protected-resource` | sidecar, metadata/404 próprio |
 | `/keys` sem credencial | sidecar |
-| `/web/` com Basic | engine, 200 + cookie |
-| `GET /api/v1/workspaces` só cookie | engine, 200 |
-| `POST /admin/commit` só cookie | 401 |
-| `GET /api/v1/workspaces` com bearer | engine, 200 |
-| `GET` sem cookie e sem bearer | 401 |
+| `/web/` sem credencial | engine, 200 via bearer interno; sem cookie/challenge |
+| `/web/ops` sem credencial | SPA redireciona para `/web/login` |
+| `GET /api/v1/workspaces` sem bearer | 401 |
+| `GET /api/v1/workspaces` com bearer válido | engine, 200 |
 
-O log do sidecar mostrou subrequest de `/verify` **só** para `/admin/commit` e
-`/api/v1/workspaces`. A suíte `e2e/live.spec.ts` passou inteira (4/4, incluindo
-"sessão só-cookie vê as telas e não oferece mutação") apontada para a porta do
-Caddy em vez do engine.
+O log do sidecar mostra subrequest de `/verify` apenas para as APIs protegidas.
+A suíte `e2e/live.spec.ts` passou 4/4 contra a borda pública, incluindo login
+sem chave e entrada pela tela com a chave `operator`.
 
-Antes do corte, repetir contra a porta nova:
+Antes de qualquer novo corte, repetir:
 
 1. os cinco headers forjados (um a um e combinados) chegam só com valor
    verificado;
 2. um `/hook` com `X-Memory-Actor-Session-Id` preserva a sessão;
 3. `/keys*`, `/web*` e `/.well-known/oauth-protected-resource` não aparecem no
-   log do `mcp-auth` como subrequest de `/verify` — se aparecerem, o catch-all
-   deixou de ser mutuamente exclusivo;
-4. `/.well-known/oauth-protected-resource` é respondido pelo **sidecar**. Com
-   OAuth desligado (o caso hoje) ele devolve `404 page not found` — o 404 do
-   Go, com corpo. O engine devolve 404 de **corpo vazio**. É o corpo que
-   discrimina, não o status: `curl -s <base>/.well-known/oauth-protected-resource`
-   tem de imprimir `404 page not found`. Com `OAUTH_ENABLED=true`, vira 200 com
-   o JSON de metadata;
+   log do `mcp-auth` como subrequest de `/verify`;
+4. `/.well-known/oauth-protected-resource` vem do sidecar. Com OAuth desligado
+   devolve `404 page not found`; com `OAUTH_ENABLED=true`, vira 200;
 5. `POST /hook` com o token de hook devolve **202** e a sessão registra
-   `actor_user` (medido: `user:djalmajr`). Se vier 401, falta
-   `UPSTREAM_AUTH_TOKEN`; se vier 202 com `actor_user` vazio, ele está igual ao
-   `AI_MEMORY_AUTH_TOKEN` e caiu no rung root;
-6. Basic no `/web` → `GET /api/v1/...` só com cookie devolve 200 e
-   `POST /admin/...` só com cookie devolve 401;
+   `actor_user`;
+6. `/web/` sem credencial devolve 200, sem `WWW-Authenticate` e sem
+   `Set-Cookie`; `/api/v1/workspaces` sem bearer continua 401;
 7. `E2E_BASE_URL=http://127.0.0.1:8080/web npx playwright test e2e/live.spec.ts`
    passa 4/4.
 
@@ -546,32 +528,30 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 ## 6. Smoke da área administrativa em produção
 
 A suíte `e2e/live.spec.ts` é opt-in e não guarda credencial nenhuma no arquivo.
-Na borda com `PASSTHROUGH_UNKNOWN_BEARER=0`, use o bearer raiz apenas no Basic
-que protege o documento e uma chave `amk_` administrativa na SPA:
+Na borda com a SPA pública, a chave administrativa entra apenas no
+`localStorage` do browser de teste:
 
 ```bash
 cd ~/Developer/djalmajr/ai-memory-ui
 E2E_BASE_URL=https://memory.djalmajr.dev/web \
-E2E_BASIC_TOKEN=<bearer raiz> \
 E2E_ADMIN_TOKEN=<chave amk_ operator> \
 E2E_USER_TOKEN=<chave amk_ read,write> \
 E2E_SCOPE_PATH=/s/djalmajr/ai-memory \
 npx playwright test e2e/live.spec.ts
 ```
 
-Cobre: telas administrativas com dados reais, escopo listando páginas e abrindo
-o leitor, tier de usuário sem área administrativa, e — importante — **sessão
-só-cookie não recebe botão de mutação**.
+Cobre: login prototipado sem chave, telas administrativas com dados reais,
+escopo listando páginas e abrindo o leitor, e tier de usuário sem área
+administrativa.
 
-## 7. Nota de auth que muda a percepção da UI
+## 7. Contrato de autenticação da UI
 
-Num engine com auth configurada, o próprio HTML do `/web` é protegido. Quem
-autentica é o engine: Basic com **qualquer** usuário e a senha = bearer raiz.
-Aceito o Basic, ele emite o cookie `ai_memory_auth`, e **esse cookie autentica
-apenas GET** — toda mutação exige o header `Authorization`.
+`/web*` é público **somente para carregar a SPA**. O Caddy autentica essa rota
+internamente no engine com `AI_MEMORY_WEB_UPSTREAM_TOKEN`, cujo valor vem de
+`${AI_MEMORY_AUTH_TOKEN}` no compose. O browser nunca recebe o token raiz nem
+um cookie root.
 
-A SPA trata isso explicitamente: uma sessão autenticada só por cookie recebe o
-degrau `cookie-admin`, vê todas as telas de leitura e tem **todas as ações de
-escrita desabilitadas**, com o aviso "cole sua chave de acesso para executar
-operações". Chamar essa sessão de "anônima" seria mentira, e oferecer os botões
-seria oferecer um 401 garantido.
+Sem chave no `localStorage`, os probes de `/api/v1` respondem 401 e o guard
+leva para `/login`. A chave colada fica apenas no navegador e é enviada como
+Bearer nas APIs. Sair remove essa chave e volta ao login. `/keys*`, `/api/v1`,
+`/admin`, `/mcp`, `/hook` e `/handoff` continuam protegidos.
