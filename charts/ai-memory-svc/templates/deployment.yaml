@@ -104,12 +104,12 @@ spec:
               value: {{ .Values.aiMemory.rootUsername | quote }}
             {{- end }}
             {{- /* Base-path hosting: when the ingress is path-based AND not stripping,
-               the engine owns the prefix (nests its whole surface under it) and the
-               web UI mounts at <base><webSlug>. Emitted ONLY in this mode, so root /
-               strip-mode deploys keep an unchanged manifest. */}}
+               the engine owns the prefix (nests its whole surface under it). */}}
             {{- if and .Values.ingress.enabled (ne (.Values.ingress.path | default "/") "/") (not .Values.ingress.stripPathPrefix) }}
             - name: AI_MEMORY_BASE_PATH
               value: {{ .Values.ingress.path | quote }}
+            {{- end }}
+            {{- if .Values.aiMemory.enableWeb }}
             - name: AI_MEMORY_WEB_SLUG
               value: {{ .Values.aiMemory.webSlug | default "/web" | quote }}
             {{- end }}

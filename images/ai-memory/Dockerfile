@@ -1,4 +1,4 @@
-# Bundle: ai-memory (engine, Rust) + custom SPA (ai-memory-ui) served at /web.
+# Bundle: ai-memory (engine, Rust) + custom SPA (ai-memory-ui) served at the host root.
 #
 # Clones both PUBLIC repos at pinned refs (build-args) and produces ONE image.
 # The same image serves all instances (personal/client) — only the push registry
@@ -42,11 +42,14 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /ui
-# Same cache-bust trick as the Rust stage below: ADD a GitHub commits
-# URL whose body shifts each time the UI branch tip moves, forcing
-# buildkit to invalidate the `git clone` layer + everything downstream.
+# Cache-bust from the exact immutable ref, then fetch it directly. `git fetch`
+# accepts release tags and reachable 40-character SHAs; `git clone --branch`
+# rejected SHAs even though the workflow explicitly permits them.
 ADD ${AI_MEMORY_UI_REPO_API}/commits/${AI_MEMORY_UI_REF} /tmp/ui-tip.json
-RUN git clone --depth 1 --branch "${AI_MEMORY_UI_REF}" "${AI_MEMORY_UI_REPO}" .
+RUN git init \
+ && git remote add origin "${AI_MEMORY_UI_REPO}" \
+ && git fetch --depth 1 origin "${AI_MEMORY_UI_REF}" \
+ && git checkout --detach FETCH_HEAD
 RUN npm ci
 ENV VITE_APP_NAME=${VITE_APP_NAME}
 ENV VITE_APP_TAGLINE=${VITE_APP_TAGLINE}
@@ -63,14 +66,13 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends pkg-config build-essential curl ca-certificates git \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /work
-# Cache-bust the git clone when the branch tip moves: ADD a URL whose
-# response body changes whenever AI_MEMORY_REF advances. buildkit detects
-# the change and invalidates this + subsequent layers. Without this, a
-# `latest` tag rebuilt against the same branch silently keeps using the
-# cached source (commit 0c6012d would never be rebuilt because the prior
-# 3b902ac layer is cached). The ADD must happen BEFORE `git clone`.
+# Cache-bust from the exact immutable ref, then fetch it directly. This keeps
+# SHA-pinned candidate builds auditable without requiring a release tag.
 ADD ${AI_MEMORY_REPO_API}/commits/${AI_MEMORY_REF} /tmp/git-tip.json
-RUN git clone --depth 1 --branch "${AI_MEMORY_REF}" "${AI_MEMORY_REPO}" .
+RUN git init \
+ && git remote add origin "${AI_MEMORY_REPO}" \
+ && git fetch --depth 1 origin "${AI_MEMORY_REF}" \
+ && git checkout --detach FETCH_HEAD
 # TAILWIND_SKIP=1 skips the Tailwind checksum step in build.rs (headless/CI).
 RUN TAILWIND_SKIP=1 cargo build --release -p ai-memory-cli \
  && cp target/release/ai-memory /usr/local/bin/ai-memory
@@ -92,7 +94,8 @@ COPY --from=builder /work/hooks /usr/local/share/ai-memory/hooks
 # Custom SPA — served via `serve --web-ui-dir /web-ui` (comes from the chart args).
 COPY --from=ui /ui/dist /web-ui
 USER ai-memory
-ENV AI_MEMORY_DATA_DIR=/data
+ENV AI_MEMORY_DATA_DIR=/data \
+    AI_MEMORY_WEB_SLUG=/
 WORKDIR /data
 EXPOSE 49374
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \

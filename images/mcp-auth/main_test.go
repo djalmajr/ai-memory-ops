@@ -456,3 +456,243 @@ func TestReadyzPerMode(t *testing.T) {
 		})
 	}
 }
+
+func verifyReq(method, uri, authorization string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	req.Header.Set("X-Forwarded-Method", method)
+	req.Header.Set("X-Forwarded-Uri", uri)
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	handleVerify(rec, req)
+	return rec
+}
+
+func TestParseAuthorization(t *testing.T) {
+	cases := []struct {
+		header, kind, token string
+	}{
+		{"", "discard", ""},
+		{"   ", "discard", ""},
+		{"Bearer", "bearer", ""},
+		{"bearer", "bearer", ""},
+		{"BEARER", "bearer", ""},
+		{"Bearer ", "bearer", ""},
+		{"Bearer tok", "bearer", "tok"},
+		{"bearer tok", "bearer", "tok"},
+		{"Bearer  tok  ", "bearer", "tok"},
+		{"Bearer\ttok", "bearer", "tok"},
+		{"bEaReR\t tok \t", "bearer", "tok"},
+		{"Basic dXNlcjpwYXNz", "discard", ""},
+		{"basic dXNlcjpwYXNz", "discard", ""},
+		{"Token abc", "discard", ""},
+		{"Authorization", "discard", ""},
+	}
+	for _, tc := range cases {
+		kind, token := parseAuthorization(tc.header)
+		if kind != tc.kind || token != tc.token {
+			t.Errorf("parseAuthorization(%q) = (%q,%q), want (%q,%q)", tc.header, kind, token, tc.kind, tc.token)
+		}
+	}
+}
+
+func TestParseAuthorizationValuesRejectsAmbiguousBearer(t *testing.T) {
+	cases := []struct {
+		name   string
+		values []string
+		kind   string
+		token  string
+	}{
+		{"single_bearer", []string{"bearer tok"}, "bearer", "tok"},
+		{"bearer_after_basic", []string{"Basic dXNlcjpwYXNz", "bearer tok"}, "bearer", "tok"},
+		{"duplicate_bearer", []string{"Bearer one", "Bearer two"}, "bearer", ""},
+		{"coalesced_duplicate", []string{"Bearer one, bearer two"}, "bearer", ""},
+		{"non_bearer", []string{"Basic dXNlcjpwYXNz", "Token abc"}, "discard", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, token := parseAuthorizationValues(tc.values)
+			if kind != tc.kind || token != tc.token {
+				t.Fatalf("got (%q,%q), want (%q,%q)", kind, token, tc.kind, tc.token)
+			}
+		})
+	}
+}
+
+func TestVerifyNeverEmitsBasicChallenge(t *testing.T) {
+	setupOAuth()
+	session := &http.Cookie{Name: sessionCookieName, Value: "ams_forged"}
+	cases := []struct {
+		name, authorization string
+		cookies             []*http.Cookie
+		want                int
+	}{
+		{"missing", "", nil, http.StatusUnauthorized},
+		{"basic", "Basic dXNlcjpwYXNz", nil, http.StatusUnauthorized},
+		{"empty_header", " ", nil, http.StatusUnauthorized},
+		{"unknown_scheme", "Token abc", nil, http.StatusUnauthorized},
+		{"basic_plus_cookie", "Basic dXNlcjpwYXNz", []*http.Cookie{session}, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := verifyReq("GET", "/api/v1/workspaces", tc.authorization, tc.cookies...)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
+			}
+			if wa := rec.Header().Get("WWW-Authenticate"); strings.Contains(strings.ToLower(wa), "basic") {
+				t.Errorf("WWW-Authenticate = %q, must not announce Basic", wa)
+			}
+		})
+	}
+}
+
+func TestVerifyPrecedenceMatrix(t *testing.T) {
+	oauthEnabled = false
+	passthroughUnknownBearer = false
+	hookAuthToken = ""
+	upstreamAuthToken = ""
+	t.Cleanup(func() { passthroughUnknownBearer = false })
+
+	session := &http.Cookie{Name: sessionCookieName, Value: "ams_forged"}
+	wrongCookie := &http.Cookie{Name: "ai_memory_auth", Value: "legacy"}
+	assertNoIdentity := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		if rec.Header().Get("Authorization") != "" {
+			t.Errorf("Authorization = %q, want empty (sidecar must not claim session identity)", rec.Header().Get("Authorization"))
+		}
+		for _, h := range []string{
+			"X-Memory-Actor-User", "X-Memory-Actor-Sub", "X-Memory-Actor-Issuer",
+			"X-Memory-Actor-Client", "X-Memory-Actor-Agent",
+		} {
+			if rec.Header().Get(h) != "" {
+				t.Errorf("%s = %q, want empty", h, rec.Header().Get(h))
+			}
+		}
+	}
+
+	t.Run("cookie_passthrough_without_identity", func(t *testing.T) {
+		rec := verifyReq("GET", "/admin/status", "", session)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		assertNoIdentity(t, rec)
+	})
+
+	t.Run("forged_cookie_still_200", func(t *testing.T) {
+		rec := verifyReq("GET", "/api/v1/workspaces", "", &http.Cookie{Name: sessionCookieName, Value: "not-a-session"})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 — engine is the session authority", rec.Code)
+		}
+		assertNoIdentity(t, rec)
+	})
+
+	t.Run("wrong_cookie_name_401", func(t *testing.T) {
+		rec := verifyReq("GET", "/api/v1/workspaces", "", wrongCookie)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+	})
+
+	t.Run("invalid_bearer_does_not_fall_back_to_cookie", func(t *testing.T) {
+		rec := verifyReq("GET", "/admin/status", "Bearer not-a-jwt", session)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+		assertNoIdentity(t, rec)
+	})
+
+	t.Run("empty_bearer_does_not_fall_back_to_cookie", func(t *testing.T) {
+		for _, auth := range []string{"Bearer", "Bearer ", "bearer"} {
+			rec := verifyReq("GET", "/admin/status", auth, session)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("%q status = %d, want 401", auth, rec.Code)
+			}
+		}
+	})
+
+	t.Run("basic_plus_cookie_passthrough", func(t *testing.T) {
+		rec := verifyReq("GET", "/admin/status", "Basic dXNlcjpwYXNz", session)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		assertNoIdentity(t, rec)
+	})
+
+	t.Run("unknown_scheme_plus_cookie_passthrough", func(t *testing.T) {
+		rec := verifyReq("GET", "/api/v1/workspaces", "Token abc", session)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		assertNoIdentity(t, rec)
+	})
+
+	t.Run("empty_authorization_plus_cookie", func(t *testing.T) {
+		rec := verifyReq("GET", "/api/v1/workspaces", " ", session)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		assertNoIdentity(t, rec)
+	})
+
+	t.Run("aim_passthrough_echoes_without_actor_headers", func(t *testing.T) {
+		token := "aim_" + strings.Repeat("ab", 20)
+		rec := verifyReq("GET", "/api/v1/workspaces", "Bearer "+token, session)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if got := rec.Header().Get("Authorization"); got != "Bearer "+token {
+			t.Errorf("Authorization = %q, want echoed aim_ bearer", got)
+		}
+		if rec.Header().Get("X-Memory-Actor-User") != "" {
+			t.Errorf("native key passthrough must not set actor headers")
+		}
+	})
+
+	t.Run("lowercase_bearer_is_a_machine_attempt", func(t *testing.T) {
+		rec := verifyReq("GET", "/api/v1/workspaces", "bearer not-a-jwt", session)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+	})
+
+	t.Run("tab_separated_bearer_is_a_machine_attempt", func(t *testing.T) {
+		rec := verifyReq("GET", "/api/v1/workspaces", "bEaReR\tnot-a-jwt", session)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+	})
+
+	t.Run("duplicate_bearers_reject_even_when_one_is_valid", func(t *testing.T) {
+		previousHookToken := hookAuthToken
+		hookAuthToken = "valid-hook-token"
+		defer func() { hookAuthToken = previousHookToken }()
+
+		req := httptest.NewRequest(http.MethodPost, "/verify", nil)
+		req.Header.Set("X-Forwarded-Method", "POST")
+		req.Header.Set("X-Forwarded-Uri", "/hook")
+		req.Header.Add("Authorization", "Bearer valid-hook-token")
+		req.Header.Add("Authorization", "bearer another-token")
+		req.AddCookie(session)
+		rec := httptest.NewRecorder()
+		handleVerify(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+	})
+}
+
+func TestVerifyUnknownAmkDoesNotFallBackToCookie(t *testing.T) {
+	setupKeys(t)
+	session := &http.Cookie{Name: sessionCookieName, Value: "ams_forged"}
+	rec := verifyReq("GET", "/wiki/mcp", "Bearer amk_"+strings.Repeat("cd", 20), session)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if rec.Header().Get("Authorization") != "" {
+		t.Errorf("invalid amk_ must not echo or fall back to cookie identity")
+	}
+}

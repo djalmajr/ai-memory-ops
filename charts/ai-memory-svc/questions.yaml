@@ -193,7 +193,7 @@ questions:
     show_if: "ingress.enabled=true"
   - variable: ingress.stripPathPrefix
     label: "Strip Path Prefix"
-    description: "When path is not '/', strip it before the backend (the engine serves /mcp, /web at root)."
+    description: "When path is not '/', strip it before the backend (the engine serves /mcp and its configured webSlug at root)."
     type: boolean
     default: false
     group: "Networking & Ingress"

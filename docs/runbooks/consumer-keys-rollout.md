@@ -37,6 +37,13 @@ Backups operacionais: `/opt/ai-memory/compose.yml.bak-pre-consumer-keys`,
 `/opt/ai-memory/{.env,compose.yml}.bak-token-rotation-*` e o par
 `/opt/ai-memory/{Caddyfile,compose.yml}.bak-login-route-*`.
 
+**Alvo (Stories 05–07, código/runbook neste repo — corte no servidor é o
+Gate 3):** SPA password-only em `/` e nas subrotas do app, cookie
+`ai_memory_session`, Caddy sem inject do bearer raiz nas rotas públicas da SPA,
+handles `/auth*` e `/internal/*`, sidecar com passthrough de cookie e
+introspecção em `/keys*`. `/web` passa a ser somente redirect legado. Este
+runbook **não** muta `/opt`. Ver seção 8.
+
 ## 1. Build da SPA
 
 ```bash
@@ -59,16 +66,20 @@ estágio `ui`, com `COPY --from=ui /ui/dist /web-ui`. O compose de produção
 **não monta volume em `/web-ui`** — a SPA vem da imagem. Então não existe
 `rsync dist/` neste deploy: publicar a UI é
 
-1. push na `main` do `ai-memory-ui`;
-2. rebuild da imagem `ai-memory` (o workflow `build-images.yml` cobre isso: ele
-   dispara em `images/**` e a matriz inclui `ai-memory`, então um push no ops
-   também reconstrói a imagem já com a SPA nova);
-3. apontar o compose para o digest novo e recriar o container.
+1. push na `main` do `ai-memory-ui` **e** `engine_ref`/`ui_ref` imutáveis
+   registrados no preflight (SHA de 40 caracteres ou release tag);
+2. `workflow_dispatch` de `build-images.yml` com `image=ai-memory` e esses
+   refs. Push em `images/mcp-auth/**` **não** reconstrói `ai-memory`. Dispatch
+   **nunca** empurra `latest`;
+3. apontar o compose para o **digest** candidato e recriar o container no
+   Gate 3, nunca `ai-memory:latest`.
 
 ```bash
-# digest publicado
-docker pull --platform linux/amd64 ghcr.io/djalmajr/ai-memory-ops/ai-memory:latest
-docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/djalmajr/ai-memory-ops/ai-memory:latest
+# Use a tag único exibido pelo workflow dispatch; nunca resolva `latest`.
+CANDIDATE_TAG='candidate-<run-id>-<run-attempt>'
+IMAGE="ghcr.io/djalmajr/ai-memory-ops/ai-memory:${CANDIDATE_TAG}"
+docker pull --platform linux/amd64 "$IMAGE"
+docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE"
 
 # no servidor: backup, troca do digest, recriação
 cp /opt/ai-memory/compose.yml /opt/ai-memory/compose.yml.bak-pre-adminui
@@ -132,6 +143,10 @@ compose do servidor:
       # 404 vir do sidecar (quem serve o endpoint) e não do engine.
       # OAUTH_ENABLED: "true"
       # OAUTH_RESOURCE: https://memory.djalmajr.dev
+      # Gate 2+: introspect sessions for /keys*. URL is Compose DNS, never
+      # Caddy :8080. HOST must already be in AI_MEMORY_ALLOWED_HOSTS.
+      ENGINE_INTERNAL_URL: http://ai-memory:49374
+      ENGINE_INTERNAL_HOST: ${ENGINE_INTERNAL_HOST}
     volumes:
       - mcp-auth-keys:/data
 ```
@@ -157,18 +172,26 @@ cw=env("caddy","AI_MEMORY_WEB_UPSTREAM_TOKEN")
 print("proxy token no engine :", "presente" if pe else "AUSENTE")
 print("proxy != root         :", "DISTINCT" if pe and pe != rt else "SAME/AUSENTE")
 print("engine == sidecar     :", ("MATCH" if pe==ps==us else "DIFFER") if (ps or us) else "n/a")
-print("caddy web == root     :", "MATCH" if cw and cw==rt else "DIFFER/AUSENTE")
+print("caddy web token       :", "AUSENTE" if not cw else "PRESENTE")
+print("engine internal url   :", "presente" if env("mcp-auth","ENGINE_INTERNAL_URL") else "AUSENTE")
+print("engine internal host  :", "presente" if env("mcp-auth","ENGINE_INTERNAL_HOST") else "AUSENTE")
+print("trusted proxy cidrs   :", "presente" if env("ai-memory","AI_MEMORY_AUTH__TRUSTED_PROXY_CIDRS") else "AUSENTE")
 '
 ```
 
 Lê o compose **resolvido**, então cobre literal e `${...}` igualmente, e não
-depende de o `.env` estar exportado no shell. O estado esperado é
-`engine == sidecar: MATCH`, `proxy != root: DISTINCT` e
-`caddy web == root: MATCH`.
+depende de o `.env` estar exportado no shell.
+
+**Hoje (aplicado):** `engine == sidecar: MATCH`, `proxy != root: DISTINCT` e
+`caddy web token: PRESENTE` (inject do raiz em `/web*`).
+
+**Alvo (Gate 3):** os mesmos MATCH/DISTINCT, mais `caddy web token: AUSENTE`,
+`engine internal url/host: presente` e `trusted proxy cidrs: presente`.
+`PRESENTE` no Caddy depois do corte significa que o inject de raiz voltou e
+a SPA password-only não é pública de verdade.
 
 `DIFFER` em `engine == sidecar` faz toda chave `amk_` retornar 401; `SAME` em
 `proxy != root` transforma toda identidade traduzida em Root sem atribuição.
-`DIFFER/AUSENTE` no Caddy devolve o desafio Basic antes de a SPA carregar.
 
 Nota de higiene: o commit `223927b` deste repo (público) registrou por engano um
 prefixo de 12 hex do SHA-256 do token de proxy vivo. Já saiu do HEAD. Um
@@ -188,10 +211,10 @@ segredo vivo não volta a arquivo versionado.
 > `Authorization` e injeta `X-Memory-Actor-*` — isso é `forward_auth` (Caddy),
 > `auth_request` (nginx) ou `forwardAuth` (Traefik), não ingress de túnel.
 >
-> Portanto o passo 3 exige uma decisão de infraestrutura ainda não tomada:
-> introduzir um proxy local na frente de `engine` + `mcp-auth` e reapontar o
-> `cloudflared` para ele. Isso muda o único caminho de entrada do sistema em
-> produção — deve ser feito com janela e rollback combinados, não de passagem.
+> **Nota (2026-08-30):** a topologia acima é **histórica**. Caddy já escuta em
+> `127.0.0.1:8080` e o túnel aponta para essa porta (seção 0). O Gate 3 troca
+> o Caddyfile aplicado pelo de destino; rollback do ingresso continua
+> reapontar para `http://127.0.0.1:49374`.
 
 > **Como reapontar o túnel** (de `djalmajr/infra` →
 > `runbooks/04-cloudflare-tunnel.md`): o ingress é gerenciado por API, tunnel
@@ -208,10 +231,11 @@ segredo vivo não volta a arquivo versionado.
 > inteira e apagaria `rancher`/`penpot`. Rollback = rodar o mesmo comando com
 > `ORIGIN=http://127.0.0.1:49374`.
 
-### Proxy sugerido: Caddy — config **testada**, não proposta
+### Proxy Caddy — config **aplicada** (2026-08-29), inject de raiz em `/web*`
 
 O container recebe somente a credencial interna necessária para servir a SPA;
-não use `env_file`, que exporia ao Caddy todas as credenciais de providers:
+não use `env_file`, que exporia ao Caddy todas as credenciais de providers.
+Este bloco é o estado **vivo** até o Gate 3. O alvo (sem inject) vem a seguir.
 
 ```yaml
   caddy:
@@ -274,248 +298,183 @@ não use `env_file`, que exporia ao Caddy todas as credenciais de providers:
 }
 ```
 
-A lista de `copy_headers` é o ponto de segurança, e ela tem exatamente os
-**cinco** headers que o `mcp-auth` emite (`main.go:481-503`). Verificado com
-Caddy 2 contra um upstream de eco:
+### Caddy/compose de destino (Stories 05–07) — **não** recarregar o tráfego até o Gate 3
 
-- `copy_headers` é **autoritativo sobre a lista**: header presente na resposta
-  do `/verify` é setado no request; header **ausente é removido**. Forjar os
-  cinco de fora resulta em só o valor verificado no upstream.
-- Header de ator **fora da lista passa forjado**. Com a lista curta
-  (User/Sub/Issuer), um `X-Memory-Actor-Client: forjado-cli` e um
-  `X-Memory-Actor-Agent: forjado-agent` do cliente **chegaram** ao upstream —
-  o engine confia nos dois (`auth.rs:1004`), então atribuição de cliente/agente
-  ficaria forjável.
-- Dentro de `route`, o strip explícito dos cinco roda antes e **não** derruba o
-  ator verificado (testado). Fora de `route` ele roda **depois** do
-  `copy_headers` e o ator chega **vazio** — se tirar o `route`, tire o strip
-  junto.
-- **Nunca** use o strip curinga `request_header -X-Memory-Actor-*`: ele apaga
-  também o `X-Memory-Actor-Session-Id` legítimo (testado — a sessão do hook
-  desaparece). Enumere os cinco.
+Validar sintaxe no servidor (`caddy validate --config`) sem apontar o túnel.
+Não existe janela pública em que a SPA password-only fique atrás deste Caddy
+antigo (`/auth/login` receberia 401). Engine/UI novo + este Caddy entram no
+mesmo gate de manutenção.
 
-`X-Memory-Actor-Session-Id` fica **deliberadamente fora da lista**, e isso não
-é descuido:
+A lista de `copy_headers` continua o ponto de segurança: é **autoritativa**.
+Header presente na resposta do `/verify` é setado; header **ausente é
+removido**. Enumere os cinco actor headers. **Nunca** use
+`request_header -X-Memory-Actor-*`: o wildcard apaga
+`X-Memory-Actor-Session-Id` (auto-scope de hook/workstream). Authorization é
+decidido no sidecar, que examina todos os valores do header, reconhece Bearer
+sem diferenciar maiúsculas/minúsculas e recusa tentativas vazias, HTAB ou
+duplicadas sem cair para cookie. Não filtre o esquema no Caddy: isso cria uma
+segunda implementação do parser HTTP.
 
-- o sidecar nunca o emite — é reservado à sessão real de lifecycle-hook, não à
-  sessão de login do provedor (`main.go:477-479`);
-- quem o manda são o hook gerado (`install_hooks.rs:3475`) e o
-  `mcp_bridge` (`mcp_bridge.rs:19`). Listá-lo faria o Caddy **apagar** essa
-  sessão legítima em todo request, quebrando auto-scope em silêncio;
-- forjá-lo não escala privilégio: o engine trata session_id de header como
-  **cache key, não credencial** — o componente `user` vem só do `ActorContext`
-  do middleware, nunca do header. Uma sessão forjada dá o slot
-  `(user-autenticado, sessão-forjada)`, nunca o slot de outro
-  (`autoscope_stress.rs:795-804`, teste
-  `header_session_id_is_cache_key_not_credential`).
+Compose alvo (aplicar no Gate 3; o sidecar já pode receber `ENGINE_INTERNAL_*`
+no Gate 2):
 
-Isolamento de caminho, medido (o `/verify` falso logando cada subrequest):
-`/keys`, `/keys/abc123`, `/web/` e `/web/assets/x.js` **nunca** chamaram o
-`/verify`; só `/mcp` e `/api/v1/workspaces` chamaram.
+```yaml
+  mcp-auth:
+    environment:
+      ENGINE_INTERNAL_URL: http://ai-memory:49374
+      ENGINE_INTERNAL_HOST: ${ENGINE_INTERNAL_HOST}
 
-Consequência: `/keys*` e `/web*` não passam pelo strip do catch-all. Isso é
-inerte nos dois destinos:
+  ai-memory:
+    environment:
+      # A SPA é canônica na raiz do host; APIs mantêm os próprios paths.
+      AI_MEMORY_WEB_SLUG: /
+      # CIDR do peer Caddy na rede Docker, medido no host. Não use um range
+      # privado amplo; XFF de peer não confiável não pode escolher o bucket
+      # de login.
+      AI_MEMORY_AUTH__TRUSTED_PROXY_CIDRS: ${AI_MEMORY_AUTH__TRUSTED_PROXY_CIDRS}
+      AI_MEMORY_AUTH__INITIAL_ROOT_PASSWORD: ${AI_MEMORY_AUTH__INITIAL_ROOT_PASSWORD}
+      AI_MEMORY_AUTH__RECOVERY_TOKEN: ${AI_MEMORY_AUTH__RECOVERY_TOKEN}
 
-- o `mcp-auth` nunca lê `X-Memory-Actor-*` de entrada; o dono da chave vem
-  sempre da credencial de quem chama;
-- em `/web*`, o Caddy **sobrescreve** `Authorization` com o bearer raiz apenas
-  na conexão interna ao engine. O engine ignora headers de ator no degrau raiz
-  (`actor_headers_are_ignored_on_the_root_rung`) e não emite
-  `ai_memory_auth`, pois esse cookie só nasce de Basic. O bearer não é enviado
-  ao browser; o cliente recebe somente HTML/assets públicos e precisa colar uma
-  chave na rota `/login` para chamar qualquer API.
-
-Corte com risco baixo: subir Caddy + mcp-auth numa porta paralela
-(`127.0.0.1:8080`) com o engine ainda publicando 49374, validar por curl e pela
-suíte `live.spec.ts` apontada para `http://127.0.0.1:8080/web`, e só então
-reapontar o `cloudflared`. Rollback = reapontar o túnel de volta.
-
-Esta config foi exercitada com a cadeia inteira — Caddy 2 + `mcp-auth` +
-engine 1.32.2 real servindo a SPA. Resultado:
-
-| Request | Quem respondeu |
-|---|---|
-| `/.well-known/oauth-protected-resource` | sidecar, metadata/404 próprio |
-| `/keys` sem credencial | sidecar |
-| `/web/` sem credencial | engine, 200 via bearer interno; sem cookie/challenge |
-| `/web/ops` sem credencial | SPA redireciona para `/web/login` |
-| `GET /api/v1/workspaces` sem bearer | 401 |
-| `GET /api/v1/workspaces` com bearer válido | engine, 200 |
-
-O log do sidecar mostra subrequest de `/verify` apenas para as APIs protegidas.
-A suíte `e2e/live.spec.ts` passou 4/4 contra a borda pública, incluindo login
-sem chave e entrada pela tela com a chave `operator`.
-
-Antes de qualquer novo corte, repetir:
-
-1. os cinco headers forjados (um a um e combinados) chegam só com valor
-   verificado;
-2. um `/hook` com `X-Memory-Actor-Session-Id` preserva a sessão;
-3. `/keys*`, `/web*` e `/.well-known/oauth-protected-resource` não aparecem no
-   log do `mcp-auth` como subrequest de `/verify`;
-4. `/.well-known/oauth-protected-resource` vem do sidecar. Com OAuth desligado
-   devolve `404 page not found`; com `OAUTH_ENABLED=true`, vira 200;
-5. `POST /hook` com o token de hook devolve **202** e a sessão registra
-   `actor_user`;
-6. `/web/` sem credencial devolve 200, sem `WWW-Authenticate` e sem
-   `Set-Cookie`; `/api/v1/workspaces` sem bearer continua 401;
-7. `E2E_BASE_URL=http://127.0.0.1:8080/web npx playwright test e2e/live.spec.ts`
-   passa 4/4.
-
-O volume nomeado pode entrar vazio: a imagem provisiona `/data` já com dono
-`65532:65532`, e um volume novo herda dono e modo do diretório que existe na
-imagem naquele caminho. **Não** troque o `USER` para root nem adicione um passo
-de `chown` — sem o `/data` na imagem, o Docker cria o volume como `root:root`
-`0755`, o processo (UID 65532) não consegue criar o `keys.db` e o container
-morre no boot com `keys_db_open_failed: unable to open database file`.
-Reproduzido com volume limpo e corrigido na imagem antes do rollout.
-
-Na borda (o proxy que já termina TLS) — **contrato exercitado localmente, não
-suposto**:
-
-1. `/{basePath}/keys` e `/{basePath}/keys/*` vão **direto** para o `mcp-auth`.
-   Esse caminho **não** pode passar pelo `forwardAuth` do próprio sidecar: ele
-   *é* o serviço de auth, e mandá-lo autenticar a si mesmo devolve 401.
-2. `/{basePath}/web*` (documento + assets) **não** passa pelo `forwardAuth`:
-   quem autentica a UI é o **próprio engine** (Basic com a senha = bearer raiz,
-   depois cookie `ai_memory_auth`). Não há oauth2-proxy nesta topologia. Com o
-   forwardAuth ligado ali, o browser manda `Authorization: Basic …`, o sidecar
-   não entende e a tela fica em branco com `forwardAuth denied: 401`.
-3. O resto (`/mcp`, `/api/v1`, `/admin`, `/hook`, `/handoff`) passa pelo
-   `forwardAuth` do `/verify`, que **substitui** o `Authorization` pelo
-   `ACTOR_PROXY_BEARER_TOKEN` e injeta os headers de ator. Header acumulado faz
-   o engine responder `400 Ambiguous`; par OIDC incompleto responde `400`.
-
-   A borda descarta os **cinco** headers de ator que o sidecar emite —
-   enumerados, dentro de um `route`, como na config acima. **Não** descarte
-   "qualquer `X-Memory-Actor-*`": o `X-Memory-Actor-Session-Id` é legítimo
-   (vem do hook e do `mcp_bridge`, o sidecar nunca o emite) e um strip curinga
-   o apaga. Ver a seção da config para o porquê e os testes.
-
-### Credencial do operador no browser (o detalhe que decide se Consumidores funciona)
-
-A SPA guarda **uma** chave e a manda como Bearer para tudo. Para que a mesma
-chave sirva ao engine *e* ao `/keys`, ela precisa ser uma chave `amk_` com
-escopo `admin` cujo **owner seja `kind=subject`** com `issuer`/`subject` iguais
-ao `root_issuer`/`root_subject` configurados no engine. Nesse caso, verificado
-ponta a ponta:
-
-| Destino | Resultado |
-|---|---|
-| `GET /keys/whoami` | `can_issue: true`, identidade `kind=subject` |
-| `GET /api/v1/*` | 200 |
-| `GET /admin/status` | 200 (Root pelo par OIDC no rung de proxy confiável) |
-| `GET /admin/users` | 200 (UserManagement, root-only) |
-
-Se o owner for `kind=user`, o sidecar (corretamente) **não** emite o par
-issuer/sub, o engine concede apenas `User` e `/admin/*` responde 403 — a tela
-administrativa desaparece. Uma chave de operador com owner `user` serve para
-gerir chaves, não para administrar o engine.
-
-A alternativa de encaminhar o **access token OIDC** do operador para `/keys*`
-(sidecar valida o JWT e exige a realm role `mcp:admin`) **não existe neste
-host**: sem provedor no ar não há JWT para validar, e em `mode: keys-only` o
-ramo JWT falha fechado por construção. Ela volta a valer se o Keycloak for
-implantado. Até então, a credencial do operador é uma chave `amk_` com escopo
-`admin` — e o `owner_kind` dela decide se abre `Usuários` (ver os caminhos A e B
-no bootstrap abaixo).
-
-### Bootstrap da primeira chave
-
-A emissão é **fail-closed**: sem identidade, `POST /keys` responde 403 e a UI
-desabilita o submit com o estado `AUSENTE`. Então a primeira chave `admin` entra
-direto no banco:
-
-A imagem é `scratch`: **não há shell, `apk` nem `sqlite3` dentro dela** — logo
-nada de `docker compose exec mcp-auth sh`. Suba o sidecar uma vez (ele cria o
-schema), pare, semeie por um container Alpine que compartilha o **volume
-nomeado**, e suba de novo. Não use o `sqlite3` do host contra bind mount com o
-sidecar aberto: o WAL sobre bind mount do macOS devolve
-`disk I/O error (1034)` (reproduzido).
-
-O `owner_kind` da chave do operador decide se **uma** chave serve para tudo. O
-par `issuer|subject` é só um par de strings que engine e sidecar combinam —
-**não** exige provedor OIDC no ar:
-
-**Caminho A — uma chave para tudo (recomendado).** Configure no engine
-`root_issuer` + `root_subject` (hoje **ausentes** em produção; `root_username`
-já está setado) e emita a chave com `owner_kind='subject'` casando esses
-valores. O engine reconhece o par como raiz, então a mesma chave gere as chaves
-no sidecar **e** abre `Usuários` (UserManagement é root-only). Exige um restart
-do engine.
-
-**Caminho B — sem mexer no engine.** `owner_kind='user'`. A chave gere as chaves
-de consumidor e escreve na memória com atribuição, mas **não** é raiz: a tela
-`Usuários` responde 403. O bearer raiz do engine abriria `Usuários`, mas ele não
-é aceito em `/keys` (fail-closed, 403) — e a SPA guarda **uma** chave só, então
-é escolher uma das duas telas. Por isso A é o recomendado.
-
-```bash
-SECRET="amk_$(openssl rand -hex 20)"
-SHA=$(printf %s "$SECRET" | sha256sum | cut -d' ' -f1)
-VOL=$(docker volume ls -q | grep mcp-auth-keys)   # confirme o nome do volume
-
-docker compose stop mcp-auth
-docker run --rm -v "$VOL":/data alpine sh -c \
-  "apk add --no-cache sqlite >/dev/null && sqlite3 /data/keys.db \"INSERT INTO consumer_keys
-   (id,key_sha256,key_last4,actor_user,scopes,owner_kind,owner_user,owner_issuer,owner_subject,owner_label,created_at)
-   VALUES ('operator','$SHA','${SECRET: -4}','<seu-usuario>','read,write,admin',
-           'subject',NULL,'<root_issuer>','<root_subject>','<seu-usuario>',$(date +%s));\""
-docker compose start mcp-auth
-
-echo "$SECRET"   # cole na tela de login; é a única vez que aparece
+  caddy:
+    environment:
+      # Removido: AI_MEMORY_WEB_UPSTREAM_TOKEN. As rotas públicas da SPA não
+      # injetam o bearer raiz.
 ```
 
-Acima é o **caminho A**. Para o B, troque as cinco colunas de dono por
-`'user','<seu-usuario>',NULL,NULL,'<seu-usuario>'`.
+Caddy de destino — handles mutuamente exclusivos; subrotas públicas da SPA,
+`/auth`, `/keys` e `/internal` ficam **fora** do `route` do catch-all. A lista
+`@spa_routes` acompanha as rotas declaradas pelo `ai-memory-ui`; rotas de
+máquina e dados continuam no `forward_auth`:
 
-Confira: `curl -H "Authorization: Bearer $SECRET" <base>/keys/whoami` →
-`{"can_issue":true,"identity":{...}}`.
+```caddyfile
+:8080 {
+	handle /internal/* {
+		respond 404
+	}
 
-O papel `mcp:admin` e o `KEYS_ADMIN_SUBJECTS` **não se aplicam** neste host:
-ambos casam `issuer|subject` de um **JWT validado**, e sem provedor não há JWT.
-Uma chave `amk_` com escopo `admin` é o caminho de emissão aqui. Voltam a valer
-se o Keycloak for implantado (receita em `djalmajr/infra` →
-`runbooks/05-instalar-stack.md`, hoje "não implantada").
+	handle /web {
+		redir * / 308
+	}
 
-## 4. Migrar consumidores (ordem decidida: CLIs antes do hook)
+	@legacy_web path_regexp legacy_web ^/web/+(.*)$
+	handle @legacy_web {
+		redir * /{re.legacy_web.1} 308
+	}
 
-Para cada CLI (claude-code, cursor, codex, omp), um a um:
+	@spa_routes {
+		path / /index.html /favicon.ico /favicon.svg /icons.svg /assets/* /login /login/* /workspaces /workspaces/* /projects /projects/* /s /s/* /access /access/* /backups /backups/* /config /config/* /ops /ops/* /consumers /consumers/* /users /users/* /activity /activity/* /audit /audit/* /sessions /sessions/* /graph /graph/*
+	}
+	handle @spa_routes {
+		request_header -Authorization
+		request_header -X-Memory-Actor-User
+		request_header -X-Memory-Actor-Sub
+		request_header -X-Memory-Actor-Issuer
+		request_header -X-Memory-Actor-Client
+		request_header -X-Memory-Actor-Agent
+		reverse_proxy ai-memory:49374 {
+			header_up -Authorization
+			header_up -X-Memory-Actor-User
+			header_up -X-Memory-Actor-Sub
+			header_up -X-Memory-Actor-Issuer
+			header_up -X-Memory-Actor-Client
+			header_up -X-Memory-Actor-Agent
+		}
+	}
 
-1. Emitir chave `read,write` na tela **Consumidores** (o campo *Responsável* é
-   capturado da sessão de quem emite — não é digitável; sem identidade o submit
-   fica travado, por construção).
-2. Trocar o token no cliente, exercitar uma leitura e uma escrita.
-3. Confirmar a atribuição: a escrita deve aparecer com o `actor_user` da chave.
+	handle /auth* {
+		request_header -Authorization
+		request_header -X-Memory-Actor-User
+		request_header -X-Memory-Actor-Sub
+		request_header -X-Memory-Actor-Issuer
+		request_header -X-Memory-Actor-Client
+		request_header -X-Memory-Actor-Agent
+		reverse_proxy ai-memory:49374 {
+			header_up -Authorization
+			header_up -X-Memory-Actor-User
+			header_up -X-Memory-Actor-Sub
+			header_up -X-Memory-Actor-Issuer
+			header_up -X-Memory-Actor-Client
+			header_up -X-Memory-Actor-Agent
+		}
+	}
 
-Só depois de todos os CLIs migrados: rotacionar `AI_MEMORY_AUTH_TOKEN` (o
-bearer raiz deixa de ser credencial de cliente e volta a ser quebra-galho de
-operador). O token de hook é o **último** a sair, porque o `/hook` é o caminho
-que não pode piscar.
+	handle /keys* {
+		reverse_proxy mcp-auth:8081
+	}
 
-### Por que o `/hook` não pode piscar
+	handle /.well-known/oauth-protected-resource {
+		reverse_proxy mcp-auth:8081
+	}
 
-Registrado em `djalmajr/infra` →
-`gotchas/hook-auth-personal-is-oidc-device-not-static.md`: quando o hook 401a, o
-`<data_dir>/hook-spool` enche até o cap (10000 arquivos) com capturas reais
-presas, e o backlog morto **bloqueia a fila** — o drain é oldest-first, então
-captura nova não passa até alguém descartar o backlog. Não é perder só os
-eventos da janela: a captura para.
+	handle {
+		route {
+			request_header -X-Memory-Actor-User
+			request_header -X-Memory-Actor-Sub
+			request_header -X-Memory-Actor-Issuer
+			request_header -X-Memory-Actor-Client
+			request_header -X-Memory-Actor-Agent
 
-Naquele episódio o `mcp-auth` era Keycloak-only e recusava token estático no
-`/hook`. O sidecar atual tem o atalho do `HOOK_AUTH_TOKEN` (`isHookPath` +
-comparação de tempo constante) e foi medido devolvendo **202** com `actor_user`
-gravado — o caminho estático segue válido aqui. Mesmo assim: teste `POST /hook`
-**antes** de trocar qualquer credencial de hook e, se algo 401ar, esvazie o
-spool antes de seguir.
+			forward_auth mcp-auth:8081 {
+				uri /verify
+				copy_headers Authorization X-Memory-Actor-User X-Memory-Actor-Sub X-Memory-Actor-Issuer X-Memory-Actor-Client X-Memory-Actor-Agent
+			}
+			reverse_proxy ai-memory:49374
+		}
+	}
+}
+```
+
+`X-Memory-Actor-Session-Id` fica de propósito fora de `copy_headers` e do
+strip: o sidecar nunca o emite; hook/`mcp_bridge` o enviam; listá-lo faria o
+Caddy apagar a sessão legítima. Forjá-lo não escala privilégio (cache key).
+
+Antes do Gate 3, repetir no ensaio isolado:
+
+1. `/internal/*` → 404 na borda; chamada Compose-DNS + Host allowlisted +
+   proxy bearer sem actor headers alcança o handler do engine.
+2. `/`, as subrotas de `@spa_routes` e `/auth*` chegam ao engine **sem**
+   Authorization e sem os cinco actor headers; `GET /login` = 200 sem
+   `WWW-Authenticate`. `/web` = 308 para `/`, `/web/login` = 308 para
+   `/login` e barras repetidas nunca produzem `Location` iniciado por `//`.
+3. `/keys*` entrega todos os valores de `Authorization` ao sidecar; ele descarta
+   Basic/outro, mas qualquer tentativa Bearer — inclusive minúscula, vazia,
+   HTAB ou duplicada — vence o cookie e falha fechada se inválida.
+4. Cookie `ai_memory_session` atravessa `/verify` sem identidade; cookie
+   forjado também 200 no sidecar e 401 no engine.
+5. Bearer inválido + cookie **não** cai para sessão.
+6. `/hook` com `X-Memory-Actor-Session-Id` preserva auto-scope.
+7. Cinco actor headers forjados chegam só com o valor verificado pelo sidecar.
+
+## 4. Migrar consumidores (já aplicado — CLIs antes do hook)
+
+Os quatro CLIs (`claude-code`, `cursor`, `codex`, `omp`) já usam chaves `amk_`
+dedicadas. Não reemitir no cutover. Gate 4 revoga **somente** keys coladas no
+browser antigo (`operator` se aplicável). O token de hook continua o último a
+sair: quando `/hook` 401a, o spool enche até o cap e o drain oldest-first
+bloqueia captura nova.
+
+Antes de qualquer rotação de hook: `POST /hook` com o token atual deve
+devolver **202** com `actor_user`. Se 401ar, esvazie o spool antes de seguir.
 
 ## 5. Verificação de borda
 
 ```bash
 B=https://memory.djalmajr.dev
 
-# chave nova: 200 e escrita atribuída
+# chave amk_ dedicada: 200 e escrita atribuída (antes e depois do Gate 3)
 curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer amk_..." $B/api/v1/workspaces
+
+# esquema é case-insensitive: a mesma chave continua 200
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: bearer amk_..." $B/api/v1/workspaces
+
+# qualquer tentativa Bearer inválida vence o cookie e fica 401
+curl -s -o /dev/null -w '%{http_code}\n' -b "$COOKIE_JAR" \
+  -H 'Authorization: bearer invalid' $B/api/v1/workspaces
+curl -s -o /dev/null -w '%{http_code}\n' -b "$COOKIE_JAR" \
+  -H 'Authorization: Bearer' $B/api/v1/workspaces
+curl -s -o /dev/null -w '%{http_code}\n' -b "$COOKIE_JAR" \
+  -H 'Authorization: Basic Zm9vOmJhcg==' -H 'Authorization: Bearer invalid' \
+  $B/api/v1/workspaces
 
 # chave revogada: 401
 curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer amk_<revogada>" $B/api/v1/workspaces
@@ -525,11 +484,29 @@ curl -s -o /dev/null -w '%{http_code}\n' \
   -H "Authorization: Bearer amk_..." -H 'X-Memory-Actor-User: fulano' $B/api/v1/workspaces
 ```
 
-## 6. Smoke da área administrativa em produção
+Depois do Gate 3, no ensaio interno (não imprimir cookie/CSRF):
 
-A suíte `e2e/live.spec.ts` é opt-in e não guarda credencial nenhuma no arquivo.
-Na borda com a SPA pública, a chave administrativa entra apenas no
-`localStorage` do browser de teste:
+```bash
+# raiz e login públicos, sem Authorization
+curl -sI http://127.0.0.1:8080/ | grep -Ei 'HTTP/|www-authenticate'
+curl -sI http://127.0.0.1:8080/login | grep -Ei 'HTTP/|www-authenticate'
+
+# aliases legados redirecionam para as rotas canônicas
+curl -sI http://127.0.0.1:8080/web | grep -Ei 'HTTP/|location'
+curl -sI http://127.0.0.1:8080/web/login | grep -Ei 'HTTP/|location'
+curl --path-as-is -sI http://127.0.0.1:8080/web//evil.example | grep -Ei 'HTTP/|location'
+
+# /internal 404 na borda
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/internal/auth/session-introspect
+
+# Basic salvo não bloqueia o catch-all quando há cookie (sidecar 200, engine decide)
+# Bearer vazio/malformado ignora cookie (sidecar 401)
+```
+
+## 6. Smoke da área administrativa — hoje vs Gate 3
+
+**Hoje (key login, Caddy com inject de raiz):** a suíte `e2e/live.spec.ts` é
+opt-in. A chave administrativa entra só no `localStorage` do browser de teste:
 
 ```bash
 cd ~/Developer/djalmajr/ai-memory-ui
@@ -540,18 +517,134 @@ E2E_SCOPE_PATH=/s/djalmajr/ai-memory \
 npx playwright test e2e/live.spec.ts
 ```
 
-Cobre: login prototipado sem chave, telas administrativas com dados reais,
-escopo listando páginas e abrindo o leitor, e tier de usuário sem área
-administrativa.
+**Gate 3 (sessão + CSRF, UiHumanAuth/EngineHumanAuth):** usar
+`E2E_BASE_URL=https://memory.djalmajr.dev`. Login por username/password,
+`credentials: include`, CSRF em POST/DELETE de `/keys`. `E2E_BASE_URL` é
+obrigatório no live guard — falha, não skip. Não colar `amk_` no browser como
+fallback. Rotação de consumidores continua create+revoke; não existe
+`/keys/{id}/rotate`.
 
 ## 7. Contrato de autenticação da UI
 
-`/web*` é público **somente para carregar a SPA**. O Caddy autentica essa rota
-internamente no engine com `AI_MEMORY_WEB_UPSTREAM_TOKEN`, cujo valor vem de
-`${AI_MEMORY_AUTH_TOKEN}` no compose. O browser nunca recebe o token raiz nem
-um cookie root.
+**Hoje:** `/web*` é público **somente para carregar a SPA**. O Caddy autentica
+essa rota internamente com `AI_MEMORY_WEB_UPSTREAM_TOKEN` =
+`${AI_MEMORY_AUTH_TOKEN}`. Sem chave no `localStorage`, `/api/v1` 401 e o
+guard leva a `/login`.
 
-Sem chave no `localStorage`, os probes de `/api/v1` respondem 401 e o guard
-leva para `/login`. A chave colada fica apenas no navegador e é enviada como
-Bearer nas APIs. Sair remove essa chave e volta ao login. `/keys*`, `/api/v1`,
-`/admin`, `/mcp`, `/hook` e `/handoff` continuam protegidos.
+**Gate 3:** o inject some. As rotas de `@spa_routes` e `/auth*` chegam ao
+engine sem Authorization; `/web` apenas redireciona para a rota canônica.
+Cookie HttpOnly `ai_memory_session` + CSRF. `/keys*` no sidecar introspecta a
+sessão via `POST ${ENGINE_INTERNAL_URL}/internal/auth/session-introspect`
+(`Host=ENGINE_INTERNAL_HOST`, `Authorization: Bearer ${ACTOR_PROXY_BEARER_TOKEN}`,
+sem cookie e sem `X-Memory-Actor-*`). Owner de chave emitida por sessão:
+`{kind:user,label:username}`. `amk_` admin segue sem chamar o engine. `aim_`
+só no catch-all `/verify` (eco); em `/keys*` é 403.
+
+## 8. Gates, digests e rollback (Story 07)
+
+Este repo **não** muta `/opt`. O corte público é operacional no servidor.
+
+### Digest e workflow
+
+- Push em `images/<name>/` publica **somente** essa imagem. `ai-memory`
+  **nunca** sai de push/tag.
+- `workflow_dispatch` `image=ai-memory` exige `engine_ref` + `ui_ref`
+  imutáveis (SHA de 40 chars ou tag `vX.Y.Z`). `main`/`latest`/vazio
+  rejeitados. Dispatch **nunca** empurra `latest`.
+- `images/ai-memory/Dockerfile` busca o ref diretamente e aceita os dois
+  formatos validados pelo workflow: SHA de 40 caracteres ou release tag.
+- Gate 2 retargeta só o digest de `mcp-auth`. Não puxar `ai-memory:latest`.
+- Gate 3 aponta compose para digest candidato registrado no preflight.
+
+### Gate 0 — preflight
+
+Registrar digests atuais (engine/UI, sidecar, Caddy), commits candidatos
+`AI_MEMORY_REF`/`AI_MEMORY_UI_REF`, backup verificado do SQLite do engine e
+do `KEYS_DB`, cópia de Caddyfile/compose/inventário de **nomes** de variáveis
+(nunca valores). Confirmar por presença (não por hash impresso) que
+`AI_MEMORY_AUTH_TOKEN`, `ACTOR_PROXY_BEARER_TOKEN`, recovery e senha inicial
+são distintos. Preparar
+`AI_MEMORY_AUTH__INITIAL_ROOT_PASSWORD`, `AI_MEMORY_AUTH__RECOVERY_TOKEN`,
+`AI_MEMORY_AUTH__TRUSTED_PROXY_CIDRS` (peer Caddy),
+`ENGINE_INTERNAL_URL=http://ai-memory:49374`,
+`ENGINE_INTERNAL_HOST` já em `AI_MEMORY_ALLOWED_HOSTS`. Comprovar os quatro
+clientes `amk_`.
+
+### Gate 1 — ensaio isolado
+
+Restaurar backup em volume/rede/porta não públicos. Exercitar migrations
+V51/V52, bootstrap, troca, recovery, Users, Access, borda de sessão e
+Consumers. Provar SPA pública e browser wiki autenticado. Destruir o volume
+de ensaio; registrar só resultados.
+
+### Gate 2 — sidecar backward-compatible
+
+Publicar `mcp-auth` (path-selective). Implantar o digest novo com cookie
+passthrough, descarte de Basic, branch `aim_`, `ENGINE_INTERNAL_*`. Bearers
+atuais continuam na primeira branch. Introspecção **live falha fechada** até
+o engine do Gate 3 expor `/internal/auth/session-introspect`. Validar Caddy
+de destino sem recarregar tráfego. Pré-puxar só digests candidatos.
+
+### Gate 3 — corte coordenado
+
+1. Manutenção no ingresso.
+2. Parar o engine antigo; snapshot pré-migration.
+3. Compose/env com senha inicial, recovery, CIDR e `ENGINE_INTERNAL_*`
+   presentes; subir engine/UI pelo digest candidato.
+4. Trocar Caddy pelo de destino; remover `AI_MEMORY_WEB_UPSTREAM_TOKEN`.
+5. Tirar manutenção; smoke pelo domínio.
+6. Falha → manutenção, restaurar Caddy/compose/digests/snapshot. Nunca
+   reabrir `/admin` anonimamente.
+
+Não há dual-mode de key login nem janela aceita de `/auth/login=401`.
+
+### Gate 4 — credenciais
+
+Remover `AI_MEMORY_AUTH__INITIAL_ROOT_PASSWORD` após a troca. Recovery
+permanece break-glass. Rotacionar só keys coladas no browser antigo.
+Rotacionar `AI_MEMORY_AUTH_TOKEN` só se houve uso humano, distinto do
+actor-proxy. SPA apaga `ai-memory-ui.token`; engine expira `ai_memory_auth`.
+
+### Gate 5 — soak e V53
+
+Soak objetivo (login, Users, Access, Consumers, quatro `amk_`, Caddy sem
+inject/wildcard, captures sem Authorization em web/auth). Só então V53
+(drop `users.token_hash`). Snapshot pré-V53 é a única base de rollback para
+binário antigo. Sem versão/tag/release sem aprovação explícita.
+
+### Rollback por fronteira
+
+| Fronteira | Procedimento | Perda esperada |
+|---|---|---|
+| Antes do Gate 3 | Voltar sidecar; engine/Caddy antigos permanecem | Nenhuma mudança de usuário |
+| Depois de V51/V52 e antes de V53 | Manutenção; voltar Caddy/compose/digests | Senha/sessão não existem no UI antigo |
+| Falha só em Consumers | Voltar sidecar/rota `/keys`; sessão humana permanece | Gestão por sessão indisponível; `amk_` admin segue |
+| Depois de V53 | Parar stack, restaurar snapshot pré-V53, depois digests/Caddy | Mudanças posteriores ao snapshot precisam reaplicar |
+
+Rollback nunca transforma senha/recovery em Bearer e nunca publica `/admin`.
+
+### Matriz do sidecar (Gate 2+)
+
+| Chamada | `/verify` | `/keys*` |
+|---|---|---|
+| Bearer `amk_` admin | 200 + proxy bearer + actor | owner da chave; `can_issue` se scope admin |
+| Bearer `aim_` | 200 eco, sem actor headers | 403 |
+| Bearer JWT/`amk_` inválido | 401; cookie ignorado | 401/identidade nula; cookie ignorado |
+| Bearer minúsculo ou separado por HTAB | mesma branch Bearer; nunca cookie | mesma branch Bearer; nunca cookie |
+| Bearer vazio, duplicado ou ambíguo | 401; cookie ignorado | identidade nula; cookie ignorado |
+| Basic / esquema desconhecido / header vazio + cookie | 200 sem Authorization/actor | introspecta sessão |
+| Cookie `ai_memory_session` só | 200 sem identidade | introspecta; CSRF em POST/DELETE |
+| Engine interno ausente/timeout/redirect | n/a (cookie não consulta) | 503 fail-closed |
+| Cookie forjado | 200 | identidade nula / 403 conforme endpoint |
+
+## Assunções de deploy ainda abertas
+
+- `/opt/ai-memory/{Caddyfile,compose.yml}` não muda neste commit.
+- `ENGINE_INTERNAL_HOST` já está em `AI_MEMORY_ALLOWED_HOSTS` (ex.:
+  `memory.djalmajr.dev`); não adicionar DNS Compose nem `*`.
+- `AI_MEMORY_AUTH__TRUSTED_PROXY_CIDRS` mede-se no host (peer Caddy).
+- A rota de introspect é do EngineHumanAuth; o engine vivo provavelmente
+  ainda não a expõe — Gate 2 falha fechado até o digest do Gate 3.
+- Dockerfile `ai-memory` clona por `--branch`; Gate 3 usa release tags.
+- Nota histórica de túnel (2026-08-30): o vivo já é Caddy em
+  `127.0.0.1:8080`.

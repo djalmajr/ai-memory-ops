@@ -4,16 +4,20 @@
 # The legacy ETL image is intentionally excluded while the chart keeps ETL
 # disabled in the deployed environments.
 #
-# Triggers:
-# - push to main when images/** or this workflow change (auto-rebuild on edits)
-# - tag v* (produces a version-tagged image)
-# - manual via workflow_dispatch (rebuild any time)
+# Path selection: a push to main builds an image only when files under
+# `images/<name>/` changed. Editing this workflow file alone does not rebuild
+# anything. The first run of a sidecar change therefore publishes only mcp-auth.
+#
+# ai-memory (engine+UI bundle) is never built from a push or tag. It is
+# dispatch-only, with immutable `engine_ref` + `ui_ref` (40-char SHA or a
+# release tag). `main` / `latest` / empty are rejected. The Dockerfile fetches
+# the requested ref directly, so both accepted forms resolve to detached,
+# auditable source checkouts.
+#
+# Dispatches of the engine/UI bundle emit a unique candidate tag derived from
+# the workflow run id and attempt; they never emit a mutable channel tag.
 #
 # Single-arch (linux/amd64) for now — the target cluster (Hetzner k3s) is amd64.
-# Re-enable arm64 by adding it to `platforms` once we actually need it (multi-arch
-# roughly doubles build time; ai-memory is Rust, ~15-25 min single-arch on first run).
-#
-# Caching: GitHub Actions cache (type=gha) keeps buildx layers across runs.
 
 name: build-images
 
@@ -27,14 +31,18 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Optional extra tag to push (in addition to sha + latest)"
+      image:
+        description: "Image to build (ai-memory, mcp-auth, contributors, git-mirror, scope-guard). Empty = all except ai-memory."
         required: false
         default: ""
       engine_ref:
-        description: "ai-memory engine git ref to build (AI_MEMORY_REF build-arg). Only the ai-memory image reads it; the others ignore it. Defaults to main (upstream-tracking; deploy-v2 retired)."
+        description: "Immutable git ref for the ai-memory engine (AI_MEMORY_REF). Required when building ai-memory. SHA or release tag; never main/latest."
         required: false
-        default: "main"
+        default: ""
+      ui_ref:
+        description: "Immutable git ref for ai-memory-ui (AI_MEMORY_UI_REF). Required when building ai-memory. SHA or release tag; never main/latest."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -45,35 +53,146 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.pick.outputs.images }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Select images
+        id: pick
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          DISPATCH_IMAGE: ${{ github.event.inputs.image }}
+          ENGINE_REF: ${{ github.event.inputs.engine_ref }}
+          UI_REF: ${{ github.event.inputs.ui_ref }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          python3 <<'PY'
+          import json, os, re, subprocess, sys
+
+          DEFS = [
+              {"name": "ai-memory", "context": "images/ai-memory", "dockerfile": "images/ai-memory/Dockerfile"},
+              {"name": "mcp-auth", "context": "images/mcp-auth", "dockerfile": "images/mcp-auth/Dockerfile"},
+              {"name": "contributors", "context": "images/contributors", "dockerfile": "images/contributors/Dockerfile"},
+              {"name": "git-mirror", "context": "images/git-mirror", "dockerfile": "images/git-mirror/Dockerfile"},
+              {"name": "scope-guard", "context": "images/scope-guard", "dockerfile": "images/scope-guard/Dockerfile"},
+          ]
+          BY_NAME = {d["name"]: d for d in DEFS}
+          NON_ENGINE = [d for d in DEFS if d["name"] != "ai-memory"]
+
+          def fail(msg):
+              print(msg, file=sys.stderr)
+              sys.exit(1)
+
+          def immutable_ref(value, label):
+              v = (value or "").strip()
+              if not v or v.lower() in {"main", "latest", "head", "master"}:
+                  fail(f"{label} must be a 40-char SHA or a release tag; got {v!r}")
+              if re.fullmatch(r"[0-9a-fA-F]{40}", v):
+                  return
+              if re.fullmatch(r"v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", v):
+                  return
+              fail(f"{label} must be a 40-char SHA or a release tag; got {v!r}")
+
+          def changed_files():
+              before = os.environ.get("BEFORE") or ""
+              sha = os.environ["SHA"]
+              if re.fullmatch(r"0+", before or ""):
+                  out = subprocess.check_output(
+                      ["git", "show", "--pretty=format:", "--name-only", sha],
+                      text=True,
+                  )
+                  return [line for line in out.splitlines() if line]
+              try:
+                  out = subprocess.check_output(
+                      ["git", "diff", "--name-only", before, sha],
+                      text=True,
+                  )
+              except subprocess.CalledProcessError:
+                  out = subprocess.check_output(
+                      ["git", "show", "--pretty=format:", "--name-only", sha],
+                      text=True,
+                  )
+              return [line for line in out.splitlines() if line]
+
+          event = os.environ["EVENT_NAME"]
+          selected = []
+
+          if event == "workflow_dispatch":
+              wanted = (os.environ.get("DISPATCH_IMAGE") or "").strip()
+              if wanted:
+                  if wanted not in BY_NAME:
+                      fail(f"unknown image {wanted!r}; choose one of {sorted(BY_NAME)}")
+                  selected = [BY_NAME[wanted]]
+              else:
+                  selected = list(NON_ENGINE)
+          elif event == "push" and os.environ.get("GITHUB_REF", "").startswith("refs/tags/"):
+              selected = list(NON_ENGINE)
+          elif event == "push":
+              files = changed_files()
+              names = set()
+              for path in files:
+                  for d in NON_ENGINE:
+                      prefix = f"images/{d['name']}/"
+                      if path == prefix[:-1] or path.startswith(prefix):
+                          names.add(d["name"])
+              selected = [BY_NAME[n] for n in sorted(names)]
+          else:
+              fail(f"unsupported event {event!r}")
+
+          if any(d["name"] == "ai-memory" for d in selected):
+              immutable_ref(os.environ.get("ENGINE_REF"), "engine_ref")
+              immutable_ref(os.environ.get("UI_REF"), "ui_ref")
+
+          print("selected:", [d["name"] for d in selected] or "(none)")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("images=" + json.dumps(selected) + "\n")
+          PY
+
   build:
+    needs: select
+    if: needs.select.outputs.images != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        image:
-          - name: ai-memory
-            context: images/ai-memory
-            dockerfile: images/ai-memory/Dockerfile
-          - name: mcp-auth
-            context: images/mcp-auth
-            dockerfile: images/mcp-auth/Dockerfile
-          - name: contributors
-            context: images/contributors
-            dockerfile: images/contributors/Dockerfile
-          - name: git-mirror
-            context: images/git-mirror
-            dockerfile: images/git-mirror/Dockerfile
-          - name: scope-guard
-            context: images/scope-guard
-            dockerfile: images/scope-guard/Dockerfile
-    name: build ${{ matrix.image.name }}
+        include: ${{ fromJSON(needs.select.outputs.images) }}
+    name: build ${{ matrix.name }}
     steps:
-      # All action versions below run on Node.js 24 (the others are pinned
-      # to releases that still ship Node 20, which GitHub deprecated as of
-      # 2026-06; see the deprecation note on every build log if a version
-      # falls behind).
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Reject mutable engine/UI refs
+        if: matrix.name == 'ai-memory'
+        env:
+          ENGINE_REF: ${{ github.event.inputs.engine_ref }}
+          UI_REF: ${{ github.event.inputs.ui_ref }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+
+          def ok(value, label):
+              v = (value or "").strip()
+              if not v or v.lower() in {"main", "latest", "head", "master"}:
+                  print(f"{label} must be a 40-char SHA or a release tag; got {v!r}", file=sys.stderr)
+                  sys.exit(1)
+              if re.fullmatch(r"[0-9a-fA-F]{40}", v):
+                  return
+              if re.fullmatch(r"v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", v):
+                  return
+              print(f"{label} must be a 40-char SHA or a release tag; got {v!r}", file=sys.stderr)
+              sys.exit(1)
+
+          ok(os.environ.get("ENGINE_REF"), "engine_ref")
+          ok(os.environ.get("UI_REF"), "ui_ref")
+          PY
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -89,44 +208,35 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/djalmajr/ai-memory-ops/${{ matrix.image.name }}
-          # Auto-tag map:
-          # - branch=main          → tag `latest`
-          # - tag v1.2.3           → tags `v1.2.3`, `1.2.3`, `1.2`, `1`
-          # - any                  → tag `sha-<short>` (always emitted)
-          # - workflow_dispatch    → tag from inputs.tag (when provided)
+          images: ghcr.io/djalmajr/ai-memory-ops/${{ matrix.name }}
+          # Mutable channels only on push. Engine/UI dispatches get a unique
+          # candidate tag and are pinned by digest during rollout.
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=sha,prefix=sha-,format=short
-            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' }}
+            type=sha,prefix=sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || matrix.name != 'ai-memory' }}
+            type=raw,value=candidate-${{ github.run_id }}-${{ github.run_attempt }},enable=${{ github.event_name == 'workflow_dispatch' && matrix.name == 'ai-memory' }}
           labels: |
             org.opencontainers.image.source=https://github.com/djalmajr/ai-memory-ops
-            org.opencontainers.image.description=ai-memory-ops ${{ matrix.image.name }}
+            org.opencontainers.image.description=ai-memory-ops ${{ matrix.name }}
             org.opencontainers.image.licenses=MIT
 
       - name: Build + push
         uses: docker/build-push-action@v7
         with:
-          context: ${{ matrix.image.context }}
-          file: ${{ matrix.image.dockerfile }}
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
-          # Only the ai-memory Dockerfile declares AI_MEMORY_REF; the other
-          # images don't and harmlessly ignore it (buildkit warns, no effect).
-          # Empty inputs.engine_ref (push/tag triggers) falls back to main,
-          # matching the Dockerfile default — so non-dispatch builds track upstream.
+          # Only the ai-memory Dockerfile declares these ARGs; other images
+          # ignore them. Empty on non-engine builds. Dispatch of ai-memory
+          # has already rejected main/latest/empty.
           build-args: |
-            AI_MEMORY_REF=${{ github.event.inputs.engine_ref || 'main' }}
+            AI_MEMORY_REF=${{ github.event.inputs.engine_ref }}
+            AI_MEMORY_UI_REF=${{ github.event.inputs.ui_ref }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Registry-backed buildx cache (was type=gha; the GitHub Actions
-          # cache backend started returning HTTP 422 on cache load, failing
-          # the ai-memory image build). Registry cache is backend-independent:
-          # stored as a `:buildcache` image in the same GHCR repo, pushed/pulled
-          # with the GHCR login already done above. A missing ref (first run) is
-          # a non-fatal cache miss, not a hard error.
-          cache-from: type=registry,ref=ghcr.io/djalmajr/ai-memory-ops/${{ matrix.image.name }}:buildcache
-          cache-to: type=registry,ref=ghcr.io/djalmajr/ai-memory-ops/${{ matrix.image.name }}:buildcache,mode=max
+          cache-from: type=registry,ref=ghcr.io/djalmajr/ai-memory-ops/${{ matrix.name }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/djalmajr/ai-memory-ops/${{ matrix.name }}:buildcache,mode=max

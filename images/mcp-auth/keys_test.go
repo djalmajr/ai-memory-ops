@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -37,10 +38,24 @@ func setupKeys(t *testing.T) {
 		hookAuthToken = ""
 		hookAuthUsername = ""
 		upstreamAuthToken = ""
+		engineInternalURL = ""
+		engineInternalHost = ""
+		engineInternalClient = nil
 	})
 }
 
 func keysReq(method, path, bearer, body string) *httptest.ResponseRecorder {
+	return keysReqAuth(method, path, bearerHeader(bearer), nil, "", body)
+}
+
+func bearerHeader(bearer string) string {
+	if bearer == "" {
+		return ""
+	}
+	return "Bearer " + bearer
+}
+
+func keysReqAuth(method, path, authorization string, cookies []*http.Cookie, csrf, body string) *httptest.ResponseRecorder {
 	var rdr *bytes.Reader
 	if body != "" {
 		rdr = bytes.NewReader([]byte(body))
@@ -51,8 +66,14 @@ func keysReq(method, path, bearer, body string) *httptest.ResponseRecorder {
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+	if csrf != "" {
+		req.Header.Set(csrfHeaderName, csrf)
+	}
+	for _, c := range cookies {
+		req.AddCookie(c)
 	}
 	rec := httptest.NewRecorder()
 	handleKeys(rec, req)
@@ -244,7 +265,7 @@ func TestScopeRouteGate(t *testing.T) {
 	cases := []row{
 		{"read GET mcp", readKey, "GET", "/wiki/mcp", 200},
 		{"read GET api", readKey, "GET", "/api/v1/pages", 200},
-		{"read GET web", readKey, "GET", "/web/", 200},
+		{"read GET app route", readKey, "GET", "/login", 200},
 		// JSON-RPC multiplexes read tools (memory_query) and write tools
 		// (memory_write_page, memory_forget, …) on the same POST /mcp path.
 		// forwardAuth only sees method+path, so a read key must not pass.
@@ -501,5 +522,267 @@ func TestListKeysShape(t *testing.T) {
 	}
 	if len(payload.Keys) != 1 || payload.Keys[0].ID != "one" || payload.Keys[0].Key != "" {
 		t.Errorf("list = %+v, want one key without plaintext", payload.Keys)
+	}
+}
+
+func startSessionEngine(t *testing.T, handler http.HandlerFunc) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	setEngineInternalForTest(t, srv.URL, "memory.example.test", 0)
+}
+
+func TestKeysSessionRootManagesWithoutBearer(t *testing.T) {
+	setupKeys(t)
+	startSessionEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" || r.Header.Get("X-Memory-Actor-User") != "" {
+			http.Error(w, "bad sidecar request", http.StatusForbidden)
+			return
+		}
+		_, _ = io.WriteString(w, `{"authenticated":true,"username":"root","can_manage_api_keys":true}`)
+	})
+	cookies := []*http.Cookie{{Name: sessionCookieName, Value: "ams_root"}}
+
+	rec := keysReqAuth(http.MethodGet, "/keys/whoami", "", cookies, "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("whoami status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var whoami struct {
+		Identity *keyOwner `json:"identity"`
+		CanIssue bool      `json:"can_issue"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &whoami); err != nil {
+		t.Fatal(err)
+	}
+	if whoami.Identity == nil || whoami.Identity.Kind != "user" || whoami.Identity.Label != "root" || whoami.Identity.Issuer != "" || whoami.Identity.Subject != "" || !whoami.CanIssue {
+		t.Errorf("whoami = %+v, want user/root without issuer/subject", whoami)
+	}
+
+	rec = keysReqAuth(http.MethodGet, "/keys", "", cookies, "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = keysReqAuth(http.MethodPost, "/keys", "", cookies, "", `{"id":"from-session","actor_user":"bot","scopes":["read"]}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("POST without CSRF status = %d, want 403", rec.Code)
+	}
+
+	rec = keysReqAuth(http.MethodPost, "/keys", "", cookies, "csrf-token", `{"id":"from-session","actor_user":"bot","scopes":["read"]}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST with CSRF status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var created consumerKeyJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Owner.Kind != "user" || created.Owner.Label != "root" || created.Key == "" {
+		t.Errorf("created owner = %+v key empty=%v", created.Owner, created.Key == "")
+	}
+
+	rec = keysReqAuth(http.MethodDelete, "/keys/from-session", "", cookies, "", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("DELETE without CSRF status = %d, want 403", rec.Code)
+	}
+	rec = keysReqAuth(http.MethodDelete, "/keys/from-session", "", cookies, "csrf-token", "")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE with CSRF status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestKeysSessionUserCannotIssue(t *testing.T) {
+	setupKeys(t)
+	startSessionEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"authenticated":true,"username":"bob","can_manage_api_keys":false}`)
+	})
+	cookies := []*http.Cookie{{Name: sessionCookieName, Value: "ams_user"}}
+	rec := keysReqAuth(http.MethodGet, "/keys/whoami", "", cookies, "", "")
+	var whoami struct {
+		Identity *keyOwner `json:"identity"`
+		CanIssue bool      `json:"can_issue"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &whoami); err != nil {
+		t.Fatal(err)
+	}
+	if whoami.Identity == nil || whoami.Identity.Label != "bob" || whoami.CanIssue {
+		t.Errorf("user whoami = %+v, want bob can_issue=false", whoami)
+	}
+	rec = keysReqAuth(http.MethodGet, "/keys", "", cookies, "", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("list status = %d, want 403", rec.Code)
+	}
+	rec = keysReqAuth(http.MethodPost, "/keys", "", cookies, "csrf-token", `{"id":"nope","actor_user":"x","scopes":["read"]}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("POST status = %d, want 403", rec.Code)
+	}
+}
+
+func TestKeysSessionBasicDoesNotBlockIntrospection(t *testing.T) {
+	setupKeys(t)
+	var hits int
+	startSessionEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = io.WriteString(w, `{"authenticated":true,"username":"root","can_manage_api_keys":true}`)
+	})
+	cookies := []*http.Cookie{{Name: sessionCookieName, Value: "ams_root"}}
+	rec := keysReqAuth(http.MethodGet, "/keys/whoami", "Basic dXNlcjpwYXNz", cookies, "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if hits != 1 {
+		t.Fatalf("introspect hits = %d, want 1", hits)
+	}
+}
+
+func TestKeysInvalidBearerDoesNotFallBackToSession(t *testing.T) {
+	setupKeys(t)
+	var hits int
+	startSessionEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = io.WriteString(w, `{"authenticated":true,"username":"root","can_manage_api_keys":true}`)
+	})
+	cookies := []*http.Cookie{{Name: sessionCookieName, Value: "ams_root"}}
+	rec := keysReqAuth(http.MethodPost, "/keys", "Bearer not-a-jwt", cookies, "csrf-token", `{"id":"nope","actor_user":"x","scopes":["read"]}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (Bearer attempt wins)", rec.Code)
+	}
+	if hits != 0 {
+		t.Fatalf("introspect hits = %d, want 0", hits)
+	}
+}
+
+func TestKeysEmptyBearerDoesNotFallBackToSession(t *testing.T) {
+	setupKeys(t)
+	var hits int
+	startSessionEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = io.WriteString(w, `{"authenticated":true,"username":"root","can_manage_api_keys":true}`)
+	})
+	cookies := []*http.Cookie{{Name: sessionCookieName, Value: "ams_root"}}
+	rec := keysReqAuth(http.MethodGet, "/keys", "Bearer", cookies, "", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if hits != 0 {
+		t.Fatalf("introspect hits = %d, want 0", hits)
+	}
+}
+
+func TestKeysMalformedOrDuplicateBearerDoesNotFallBackToSession(t *testing.T) {
+	setupKeys(t)
+	var hits int
+	startSessionEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = io.WriteString(w, `{"authenticated":true,"username":"root","can_manage_api_keys":true}`)
+	})
+	session := &http.Cookie{Name: sessionCookieName, Value: "ams_root"}
+	adminSecret := mustInsertKey(t, consumerKeyRecord{
+		ID:        "duplicate-admin",
+		ActorUser: "root",
+		Scopes:    []string{"admin"},
+		Owner:     keyOwner{Kind: "user", Label: "root"},
+	})
+	basicAndBearer := httptest.NewRequest(
+		http.MethodPost,
+		"/keys",
+		strings.NewReader(`{"id":"basic-and-bearer","actor_user":"x","scopes":["read"]}`),
+	)
+	basicAndBearer.Header.Set("Content-Type", "application/json")
+	basicAndBearer.Header.Add("Authorization", "Basic dXNlcjpwYXNz")
+	basicAndBearer.Header.Add("Authorization", "Bearer "+adminSecret)
+	basicAndBearer.AddCookie(session)
+	basicAndBearerRec := httptest.NewRecorder()
+	handleKeys(basicAndBearerRec, basicAndBearer)
+	if basicAndBearerRec.Code != http.StatusCreated {
+		t.Fatalf("Basic + valid Bearer status = %d, want 201", basicAndBearerRec.Code)
+	}
+
+	cases := []struct {
+		name   string
+		values []string
+	}{
+		{"tab_separated", []string{"bEaReR\tnot-a-jwt"}},
+		{"duplicate_bearers", []string{"Bearer " + adminSecret, "Bearer two"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/keys",
+				strings.NewReader(`{"id":"nope","actor_user":"x","scopes":["read"]}`),
+			)
+			req.Header.Set("Content-Type", "application/json")
+			for _, value := range tc.values {
+				req.Header.Add("Authorization", value)
+			}
+			req.AddCookie(session)
+			rec := httptest.NewRecorder()
+			handleKeys(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", rec.Code)
+			}
+		})
+	}
+	if hits != 0 {
+		t.Fatalf("introspect hits = %d, want 0", hits)
+	}
+}
+
+func TestKeysAimForbidden(t *testing.T) {
+	setupKeys(t)
+	startSessionEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("aim_ must not introspect")
+	})
+	token := "aim_" + strings.Repeat("ab", 20)
+	rec := keysReq(http.MethodGet, "/keys/whoami", token, "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("whoami status = %d, want 403", rec.Code)
+	}
+	rec = keysReq(http.MethodPost, "/keys", token, `{"id":"nope","actor_user":"x","scopes":["read"]}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("POST status = %d, want 403", rec.Code)
+	}
+}
+
+func TestKeysAmkAdminDoesNotNeedEngine(t *testing.T) {
+	setupKeys(t)
+	secret := mustInsertKey(t, consumerKeyRecord{
+		ID: "operator", ActorUser: "rootish", Scopes: []string{"admin"},
+		Owner: keyOwner{Kind: "user", Label: "rootish"},
+	})
+	rec := keysReq(http.MethodGet, "/keys/whoami", secret, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	rec = keysReq(http.MethodPost, "/keys", secret, `{"id":"from-amk","actor_user":"bot","scopes":["read"]}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	rec = keysReq(http.MethodDelete, "/keys/from-amk", secret, "")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("revoke status = %d", rec.Code)
+	}
+}
+
+func TestKeysNoRotateEndpoint(t *testing.T) {
+	setupKeys(t)
+	rsaKey := setupRSA(t)
+	admin := adminJWT(t, rsaKey)
+	rec := keysReq(http.MethodPost, "/keys/one/rotate", admin, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 — rotation is create+revoke", rec.Code)
+	}
+}
+
+func TestKeysIntrospectionUnavailableFailsClosed(t *testing.T) {
+	setupKeys(t)
+	cookies := []*http.Cookie{{Name: sessionCookieName, Value: "ams_root"}}
+	rec := keysReqAuth(http.MethodGet, "/keys/whoami", "", cookies, "", "")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("whoami status = %d, want 503", rec.Code)
+	}
+	rec = keysReqAuth(http.MethodGet, "/keys", "", cookies, "", "")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("list status = %d, want 503", rec.Code)
 	}
 }

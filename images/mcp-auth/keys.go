@@ -439,7 +439,7 @@ func handleKeys(w http.ResponseWriter, r *http.Request) {
 func handleWhoami(w http.ResponseWriter, r *http.Request) {
 	ident, err := callerIdentity(r)
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"identity": nil, "can_issue": false})
+		writeCallerError(w, err, true)
 		return
 	}
 	if ident == nil {
@@ -452,7 +452,7 @@ func handleWhoami(w http.ResponseWriter, r *http.Request) {
 func requireIssuer(w http.ResponseWriter, r *http.Request) *caller {
 	ident, err := callerIdentity(r)
 	if err != nil {
-		writeJSONError(w, http.StatusUnauthorized, err.Error())
+		writeCallerError(w, err, false)
 		return nil
 	}
 	if ident == nil {
@@ -464,6 +464,29 @@ func requireIssuer(w http.ResponseWriter, r *http.Request) *caller {
 		return nil
 	}
 	return ident
+}
+
+func writeCallerError(w http.ResponseWriter, err error, whoami bool) {
+	switch {
+	case errors.Is(err, errNativeKeyForbidden):
+		writeJSONError(w, http.StatusForbidden, errNativeKeyForbidden.Error())
+	case errors.Is(err, errSessionCSRF):
+		writeJSONError(w, http.StatusForbidden, errSessionCSRF.Error())
+	case errors.Is(err, errSessionIntrospectFailed), errors.Is(err, errEngineInternalMisconfig), errors.Is(err, errEngineRedirect):
+		writeJSONError(w, http.StatusServiceUnavailable, "introspection unavailable")
+	case errors.Is(err, errInvalidConsumerKey):
+		if whoami {
+			writeJSON(w, http.StatusOK, map[string]any{"identity": nil, "can_issue": false})
+			return
+		}
+		writeJSONError(w, http.StatusUnauthorized, err.Error())
+	default:
+		if whoami {
+			writeJSON(w, http.StatusOK, map[string]any{"identity": nil, "can_issue": false})
+			return
+		}
+		writeJSONError(w, http.StatusForbidden, "forbidden")
+	}
 }
 
 func handleListKeys(w http.ResponseWriter, r *http.Request) {
@@ -593,12 +616,21 @@ func readJSONBody(r *http.Request) ([]byte, error) {
 }
 
 func callerIdentity(r *http.Request) (*caller, error) {
-	const prefix = "Bearer "
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, prefix) {
+	kind, tokenStr := parseAuthorizationValues(r.Header.Values("Authorization"))
+	if kind == "bearer" {
+		return callerFromBearer(tokenStr)
+	}
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil || cookie.Value == "" {
 		return nil, nil
 	}
-	tokenStr := strings.TrimPrefix(auth, prefix)
+	return callerFromSession(r, cookie.Value)
+}
+
+func callerFromBearer(tokenStr string) (*caller, error) {
+	if strings.HasPrefix(tokenStr, nativeKeyPrefix) {
+		return nil, errNativeKeyForbidden
+	}
 
 	if hookAuthToken != "" && subtle.ConstantTimeCompare([]byte(tokenStr), []byte(hookAuthToken)) == 1 {
 		return nil, nil
@@ -628,6 +660,27 @@ func callerIdentity(r *http.Request) (*caller, error) {
 		return nil, nil
 	}
 	return &caller{owner: *owner, canIssue: jwtCanIssue(claims)}, nil
+}
+
+func callerFromSession(r *http.Request, session string) (*caller, error) {
+	csrf := r.Header.Get(csrfHeaderName)
+	if isMutatingMethod(r.Method) && csrf == "" {
+		return nil, errSessionCSRF
+	}
+	result, err := introspectSession(session, r.Method, csrf)
+	if err != nil {
+		if errors.Is(err, errSessionCSRF) {
+			return nil, err
+		}
+		return nil, errSessionIntrospectFailed
+	}
+	if !result.Authenticated {
+		return nil, nil
+	}
+	return &caller{
+		owner:    keyOwner{Kind: "user", Label: result.Username},
+		canIssue: result.CanManageAPIKeys,
+	}, nil
 }
 
 func ownerFromJWT(claims jwt.MapClaims) *keyOwner {

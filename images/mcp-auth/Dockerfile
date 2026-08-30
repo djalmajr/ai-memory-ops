@@ -13,9 +13,11 @@
 #   OIDC_ISSUER         (required) — https://keycloak.example.com/realms/ai-memory-svc
 #   OIDC_AUDIENCE       (optional) — expects this aud in the JWT
 #   KEYS_DB             (optional) — sqlite path; empty disables /keys* and amk_ verify
-#   ACTOR_PROXY_BEARER_TOKEN (required when KEYS_DB is set)
+#   ACTOR_PROXY_BEARER_TOKEN (required when KEYS_DB or ENGINE_INTERNAL_URL is set)
 #   PASSTHROUGH_UNKNOWN_BEARER (optional, default 0)
 #   KEYS_ADMIN_SUBJECTS (optional) — issuer|subject list if mcp:admin cannot be added
+#   ENGINE_INTERNAL_URL (optional) — fixed direct origin http://ai-memory:49374
+#   ENGINE_INTERNAL_HOST (required with ENGINE_INTERNAL_URL) — allowlisted Host
 #   PORT                (default 8081)
 #   LOG_LEVEL           (default info)
 #   JWKS_REFRESH_SECONDS (default 300)

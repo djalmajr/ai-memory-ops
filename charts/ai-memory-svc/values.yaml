@@ -110,10 +110,10 @@ aiMemory:
   # so this only names the seed row.
   project: ""
   enableWeb: true          # mounts /web (browser) + /api/v1 (read-only)
-  webUiDir: ""             # if set, serves a custom static UI at /web (--web-ui-dir)
-  # Slug the web UI mounts at WITHIN the base path (AI_MEMORY_WEB_SLUG). Only takes
-  # effect in base-path mode (ingress path-based + stripPathPrefix=false). "/web"
-  # keeps it at <base>/web; "/" serves it at the base root (<base>). API stays at
+  webUiDir: ""             # if set, serves a custom static UI at webSlug (--web-ui-dir)
+  # Slug the web UI mounts at WITHIN the base path (AI_MEMORY_WEB_SLUG).
+  # "/web" preserves the chart's oauth2-proxy routing; dedicated-host deploys
+  # can set "/" to serve the app at the host/base root. API routes stay at
   # <base>/api/v1 regardless.
   webSlug: "/web"
   # Boot in migration-tolerant (fork) mode: skip the refinery checksum/order

@@ -30,16 +30,21 @@
 //	HOOK_AUTH_USERNAME  (optional) — username propagated as X-Auth-Username /
 //	                     X-Memory-Actor-User when the hook token matches.
 //	KEYS_DB             (optional) — sqlite path; empty disables /keys* (404) and amk_ verify
-//	ACTOR_PROXY_BEARER_TOKEN (required when KEYS_DB is set) — injected as Authorization on amk_ success
+//	ACTOR_PROXY_BEARER_TOKEN (required when KEYS_DB or ENGINE_INTERNAL_URL is set) — injected as
+//	                     Authorization on amk_ success and on session introspection
 //	PASSTHROUGH_UNKNOWN_BEARER (optional, default 0) — 200 without rewriting Authorization when the
 //	                     bearer is neither amk_ nor a valid JWT (keeps CLI tokens working mid-migration)
 //	KEYS_ADMIN_SUBJECTS (optional) — comma-separated issuer|subject pairs allowed to manage keys
 //	                     when the realm cannot add mcp:admin
+//	ENGINE_INTERNAL_URL (optional) — Compose DNS base for POST /internal/auth/session-introspect
+//	                     (example: http://ai-memory:49374). Must not be the Caddy edge.
+//	ENGINE_INTERNAL_HOST (required with ENGINE_INTERNAL_URL) — Host header already in
+//	                     AI_MEMORY_ALLOWED_HOSTS; connection still uses ENGINE_INTERNAL_URL
 //	PORT                (default 8081)
 //	LOG_LEVEL           (default info; debug|info|warn|error)
 //	JWKS_REFRESH_SECONDS (default 300 = 5min)
 //
-// Logs: JSON-line via log/slog; never logs the token, only claims without PII (sub, exp, scope).
+// Logs: JSON-line via log/slog; never logs the token, session, CSRF, or request payload.
 package main
 
 import (
@@ -135,6 +140,7 @@ func main() {
 	)
 
 	initKeys()
+	initEngineInternal()
 
 	// Without either an issuer or a key store there is nothing to validate, and
 	// the sidecar could only pass or refuse blindly. That stays fatal.
@@ -347,9 +353,27 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No header → 401
-	const prefix = "Bearer "
-	if !strings.HasPrefix(authHeader, prefix) {
+	// Bearer (case-insensitive, including empty/malformed or duplicate attempts)
+	// always wins and never falls through to a session cookie. Basic, an unknown
+	// scheme, or an empty header are discarded and must not be forwarded.
+	kind, tokenStr := parseAuthorizationValues(r.Header.Values("Authorization"))
+	if kind == "bearer" {
+		authHeader = "Bearer " + tokenStr
+	}
+	if kind != "bearer" {
+		if _, err := r.Cookie(sessionCookieName); err == nil {
+			logger.Info("verify_ok",
+				"mode", "session_cookie",
+				"method", method,
+				"uri", uri,
+				"ip", ip,
+				"elapsed_ms", time.Since(start).Milliseconds(),
+			)
+			// No Authorization and no actor headers: Caddy copy_headers will
+			// strip Authorization, and the engine is the session authority.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		logger.Info("verify_unauthorized",
 			"reason", "missing_bearer",
 			"uri", uri,
@@ -360,7 +384,17 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	tokenStr := strings.TrimPrefix(authHeader, prefix)
+	if tokenStr == "" {
+		logger.Info("verify_unauthorized",
+			"reason", "bearer_empty_or_ambiguous",
+			"uri", uri,
+			"ip", ip,
+			"elapsed_ms", time.Since(start).Milliseconds(),
+		)
+		setChallenge(w, r)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
 
 	// Lifecycle-hook shortcut: agent hooks (POST /hook, GET /handoff) are
 	// headless batch calls that cannot run an interactive OAuth flow, so they
@@ -386,6 +420,21 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if verifyConsumerKey(w, tokenStr, method, uri, ip, start) {
+		return
+	}
+
+	// Native engine keys are not in KEYS_DB. Echo them on the catch-all so the
+	// engine can hash-lookup; /keys* rejects aim_ in callerIdentity.
+	if strings.HasPrefix(tokenStr, nativeKeyPrefix) {
+		logger.Info("verify_ok",
+			"mode", "native_key",
+			"method", method,
+			"uri", uri,
+			"ip", ip,
+			"elapsed_ms", time.Since(start).Milliseconds(),
+		)
+		echoAuthorization(w, authHeader)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 
@@ -497,6 +546,51 @@ func echoAuthorization(w http.ResponseWriter, original string) {
 	if original != "" {
 		w.Header().Set("Authorization", original)
 	}
+}
+
+// parseAuthorization classifies one Authorization field value.
+// "bearer" is a machine credential attempt, including an empty token.
+func parseAuthorization(header string) (kind, token string) {
+	header = strings.Trim(header, " \t")
+	if header == "" {
+		return "discard", ""
+	}
+	separator := strings.IndexAny(header, " \t")
+	if separator < 0 {
+		if strings.EqualFold(header, "Bearer") {
+			return "bearer", ""
+		}
+		return "discard", ""
+	}
+	if strings.EqualFold(header[:separator], "Bearer") {
+		return "bearer", strings.Trim(header[separator+1:], " \t")
+	}
+	return "discard", ""
+}
+
+// parseAuthorizationValues enforces Bearer-first precedence across repeated or
+// comma-coalesced fields. Basic and unknown schemes are discarded; multiple
+// Bearer attempts are returned with an empty token so callers reject the
+// ambiguity without trying a session cookie.
+func parseAuthorizationValues(values []string) (kind, token string) {
+	bearers := 0
+	for _, value := range values {
+		for _, field := range strings.Split(value, ",") {
+			candidateKind, candidateToken := parseAuthorization(field)
+			if candidateKind != "bearer" {
+				continue
+			}
+			bearers++
+			token = candidateToken
+		}
+	}
+	if bearers == 1 {
+		return "bearer", token
+	}
+	if bearers > 1 {
+		return "bearer", ""
+	}
+	return "discard", ""
 }
 
 func parseJWT(tokenStr string) (jwt.MapClaims, string, error) {
