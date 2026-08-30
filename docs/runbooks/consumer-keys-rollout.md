@@ -6,32 +6,34 @@ consumidor do `mcp-auth` (issue #9) no deploy pessoal (Hetzner).
 O compose de produção **não vive neste repositório** — ele está no servidor, em
 `/opt/ai-memory/compose.yml`. Este runbook descreve as mudanças a aplicar lá.
 
-## 0. Estado (atualizado 2026-08-29)
+## 0. Estado (atualizado 2026-08-30)
 
-**Já aplicado em produção:**
+**Aplicado em produção:**
 
-- SPA administrativa no ar em `https://memory.djalmajr.dev/web/` — imagem
-  `ai-memory@sha256:ff0a07ba…` (a SPA é buildada dentro da imagem, ver passo 2).
-  Container `Up (healthy)`, zero linhas de erro no log, `/admin/status`
-  respondendo. Backup do compose anterior em
-  `/opt/ai-memory/compose.yml.bak-pre-adminui` (rollback = restaurar o digest
-  antigo e `docker compose up -d ai-memory`).
-- Imagem `mcp-auth` com o subsistema de chaves publicada em
-  `ghcr.io/djalmajr/ai-memory-ops/mcp-auth` (amd64, como o resto das imagens
-  deste repo) e verificada: em volume nomeado NOVO ela cria
-  `keys.db{,-shm,-wal}` como `65532` e sobe sem `keys_db_open_failed`.
+- SPA administrativa em `https://memory.djalmajr.dev/web/`, servida pelo
+  engine 1.32.2. O smoke live cobre administração, leitura de página, usuário
+  sem privilégios e sessão somente-cookie.
+- `mcp-auth` em modo `keys-only`, com banco no volume nomeado
+  `ai-memory_mcp-auth-keys`; `/keys*` é roteado diretamente ao sidecar.
+- Caddy em `127.0.0.1:8080` faz o `forward_auth` do restante da borda. O túnel
+  Cloudflare aponta para essa porta; rollback do ingresso = reapontar para
+  `http://127.0.0.1:49374`.
+- Chave `operator` (`read,write,admin`, owner `subject`) e chaves dedicadas
+  `claude-code`, `cursor`, `codex` e `omp` (`read,write`) emitidas. Cada cliente
+  leu, escreveu e apagou uma página com atribuição `djalmajr`.
+- Os quatro CLIs usam somente suas chaves `amk_`. Claude Code e OMP também
+  receberam hooks com credencial dedicada.
+- `AI_MEMORY_AUTH_TOKEN`, `ACTOR_PROXY_BEARER_TOKEN` e `HOOK_AUTH_TOKEN` foram
+  rotacionados e são distintos. `PASSTHROUGH_UNKNOWN_BEARER=0`; o bearer raiz
+  anterior e bearers desconhecidos respondem 401 na borda.
+- O spool local legado, que havia atingido 10.000 eventos sem autenticação, foi
+  autenticado, replayado e drenado antes da rotação. Sete `PreCompact` presos
+  foram recuperados com o provider LLM temporariamente desativado, evitando o
+  timeout de 300 s por evento; a configuração normal foi restaurada em seguida.
 
-**Pendente, e por quê:**
-
-- O sidecar **não está no compose** e `/keys*` responde 404 na borda: falta a
-  decisão de infraestrutura do passo 3 (não existe proxy local para pendurar o
-  forwardAuth — hoje o `cloudflared` aponta direto para o engine).
-- Migração dos CLIs e rotação de tokens (passo 5) **não iniciada**: troca
-  credencial de agente em uso e deve ser feita uma por vez, com validação.
-- A SPA já degrada sozinha nesse meio-tempo: **Consumidores** mostra o banner
-  "backend indisponível" com inventário vazio, nunca linhas fabricadas.
-- `ACTOR_PROXY_BEARER_TOKEN` já está ativo no engine (sondado: `400
-  MissingIdentity/Ambiguous` sem ator, `200` com ator válido).
+Backups operacionais: `/opt/ai-memory/compose.yml.bak-pre-consumer-keys`,
+`/opt/ai-memory/Caddyfile.bak-pre-spool-drain` e os backups de rotação
+`/opt/ai-memory/{.env,compose.yml}.bak-token-rotation-*`.
 
 ## 1. Build da SPA
 
@@ -543,13 +545,17 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 
 ## 6. Smoke da área administrativa em produção
 
-A suíte `e2e/live.spec.ts` é opt-in e não guarda credencial nenhuma no arquivo:
+A suíte `e2e/live.spec.ts` é opt-in e não guarda credencial nenhuma no arquivo.
+Na borda com `PASSTHROUGH_UNKNOWN_BEARER=0`, use o bearer raiz apenas no Basic
+que protege o documento e uma chave `amk_` administrativa na SPA:
 
 ```bash
 cd ~/Developer/djalmajr/ai-memory-ui
 E2E_BASE_URL=https://memory.djalmajr.dev/web \
-E2E_ADMIN_TOKEN=<bearer raiz> \
-E2E_USER_TOKEN=<token de usuário do banco> \
+E2E_BASIC_TOKEN=<bearer raiz> \
+E2E_ADMIN_TOKEN=<chave amk_ operator> \
+E2E_USER_TOKEN=<chave amk_ read,write> \
+E2E_SCOPE_PATH=/s/djalmajr/ai-memory \
 npx playwright test e2e/live.spec.ts
 ```
 
