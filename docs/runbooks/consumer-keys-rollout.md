@@ -11,9 +11,12 @@ O compose de produção **não vive neste repositório** — ele está no servid
 **Atualização 2026-09-04 — engine 2.0.2 (registro completo em ai-memory
 `djalmajr/infra` → `registros/2026-09-04-upgrade-2.0.2-orcarouter-penpot`):**
 
-- Engine **2.0.2** (`engine_ref=v2.0.2`, tag empurrada para o fork), imagem
-  `ghcr.io/djalmajr/ai-memory-ops/ai-memory@sha256:9258df5e217f9cc1c2847c3a2f3ba0155fa2ab2293c6237f403e0785cc5ce51a`
-  (workflow `33901850223`, `ui_ref=aa3c367…`). Wiki migrado para **OKF v0.2**
+- Engine **2.0.2** (`engine_ref=v2.0.2`, tag empurrada para o fork). Imagem
+  ativa: `ghcr.io/djalmajr/ai-memory-ops/ai-memory@sha256:8a459fc23700a831f1cbddaeb01281f158bb13863285822855293786d3414ff1`
+  (workflow `33925530180`, `ui_ref=7ec3f391…` = ai-memory-ui PR #4: sidebar
+  colapsável, tela de grafo, visão geral). O upgrade do engine em si saiu com o
+  digest `9258df5e…` (workflow `33901850223`, `ui_ref=aa3c367…`), substituído no
+  mesmo dia; backup `compose.yml.bak-ui-20260904`. Wiki migrado para **OKF v0.2**
   (backup automático em `/data/backups/ai-memory-backup-okf-v0.2-20260904-184038.tar.gz`).
 - ⚠️ A imagem anterior vinha do commit de branch `9f1762ad` (`feat/admin-console`),
   cujas migrations V51/V52 foram **renumeradas** no merge upstream (#533 → V54/V55).
