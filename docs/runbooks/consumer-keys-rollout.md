@@ -6,7 +6,35 @@ consumidor do `mcp-auth` (issue #9) no deploy pessoal (Hetzner).
 O compose de produção **não vive neste repositório** — ele está no servidor, em
 `/opt/ai-memory/compose.yml`. Este runbook descreve as mudanças a aplicar lá.
 
-## 0. Estado (atualizado 2026-08-30)
+## 0. Estado (atualizado 2026-09-04)
+
+**Atualização 2026-09-04 — engine 2.0.2 (registro completo em ai-memory
+`djalmajr/infra` → `registros/2026-09-04-upgrade-2.0.2-orcarouter-penpot`):**
+
+- Engine **2.0.2** (`engine_ref=v2.0.2`, tag empurrada para o fork), imagem
+  `ghcr.io/djalmajr/ai-memory-ops/ai-memory@sha256:9258df5e217f9cc1c2847c3a2f3ba0155fa2ab2293c6237f403e0785cc5ce51a`
+  (workflow `33901850223`, `ui_ref=aa3c367…`). Wiki migrado para **OKF v0.2**
+  (backup automático em `/data/backups/ai-memory-backup-okf-v0.2-20260904-184038.tar.gz`).
+- ⚠️ A imagem anterior vinha do commit de branch `9f1762ad` (`feat/admin-console`),
+  cujas migrations V51/V52 foram **renumeradas** no merge upstream (#533 → V54/V55).
+  A 2.0.2 recusou o store; o `refinery_schema_history` foi realinhado com script
+  cirúrgico (`/opt/ai-memory/v2fix/fix_history.py`) após ensaio num clone dos dados.
+  **Regra:** deployar só tags oficiais que já contenham o merge; nunca build de
+  branch com migration própria.
+- `compose.yml`: `AI_MEMORY_IN_CONTAINER: "1"`; LLM migrado para **OrcaRouter**
+  (`openai-compat`, `z-ai/glm-5.3-flash`, `https://api.orcarouter.ai/v1`,
+  chave em `LLM_API_KEY`). Embeddings seguem no Cloudflare `bge-m3` via
+  `OPENAI_API_KEY`; embeddings locais da 2.0 **não** ativados (modelo só inglês).
+- Auto-improve **ligado** e automático: `AI_MEMORY_AUTO_IMPROVE__SCHEDULER__ENABLED=true`,
+  `AI_MEMORY_AUTO_IMPROVE__REQUIRE_APPROVAL=false` (no `.env`).
+- 22 diretórios órfãos do wiki (projetos purgados) movidos para
+  `/opt/ai-memory/orphans-20260904/`; linha órfã em `auto_improve_scheduler_state`
+  removida (FK check limpo). Penpot removido do host e do túnel.
+- Backups: `/opt/ai-memory/backup-pre-v2-20260904T174055Z.tar.gz` e
+  `{compose.yml,.env}.bak-v2-20260904T1750Z`.
+
+**Estado anterior (2026-08-30) — mantido como histórico:**
+
 
 **Aplicado em produção:**
 
@@ -42,7 +70,7 @@ e o snapshot verificado
 (SHA-256 `518618e07175dfe1d8a1c69be952d86451e1bb8ab3605b14b227469b44dc6b74`),
 além dos backups históricos listados nas seções de rollout anteriores.
 
-A imagem ativa é
+A imagem ativa (até 2026-09-04) era
 `ghcr.io/djalmajr/ai-memory-ops/ai-memory@sha256:8b78527bef5a55b6bb33bd28a855551a9b1885ba717889ff51396fd1719c7621`,
 construída no workflow `33335168979` a partir do engine
 `9f1762ad2046564be0e8a686718ca2bb0014dc40` e da UI
